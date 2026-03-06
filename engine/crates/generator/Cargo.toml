@@ -1,0 +1,13 @@
+[package]
+name = "net-meter-generator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+net-meter-core    = { workspace = true }
+net-meter-metrics = { workspace = true }
+net-meter-ns      = { workspace = true }
+tokio = { workspace = true }
+nix = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

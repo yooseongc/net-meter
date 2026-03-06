@@ -1,0 +1,63 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/metrics",
+    "crates/ns",
+    "crates/generator",
+    "crates/responder",
+    "crates/control",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["net-meter contributors"]
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# web framework (control API)
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+
+# HTTP responder (hyper 직접 사용)
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# Linux namespace / capability
+nix = { version = "0.29", features = ["sched", "user", "socket", "net"] }
+
+# 소켓 옵션 (SO_REUSEPORT 등)
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# error handling
+anyhow = "1"
+thiserror = "1"
+
+# utilities
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+
+# metrics
+hdrhistogram = "7"
+
+# internal crates
+net-meter-core      = { path = "crates/core" }
+net-meter-metrics   = { path = "crates/metrics" }
+net-meter-ns        = { path = "crates/ns" }
+net-meter-generator = { path = "crates/generator" }
+net-meter-responder = { path = "crates/responder" }

@@ -1,0 +1,12 @@
+[package]
+name = "net-meter-ns"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+net-meter-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+nix = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "net-meter-responder"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+net-meter-core    = { workspace = true }
+net-meter-metrics = { workspace = true }
+net-meter-ns      = { workspace = true }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "net-meter-control"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "net-meter"
+path = "src/main.rs"
+
+[dependencies]
+net-meter-core      = { workspace = true }
+net-meter-metrics   = { workspace = true }
+net-meter-ns        = { workspace = true }
+net-meter-generator = { workspace = true }
+net-meter-responder = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+socket2 = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "net-meter-metrics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+net-meter-core = { workspace = true }
+hdrhistogram = { workspace = true }
