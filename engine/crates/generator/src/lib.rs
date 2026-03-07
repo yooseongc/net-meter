@@ -60,37 +60,45 @@ impl Generator {
             let protocol = pair.protocol;
             let test_type = config.test_type;
             let duration_secs = config.duration_secs;
-            let g = Arc::clone(&global);
             let p = proto_collectors
                 .get(&protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
+            let worker_count = pair.client_count.max(1) as usize;
 
-            let (tx, rx) = oneshot::channel();
-            self.shutdown_txs.push(tx);
+            for worker_idx in 0..worker_count {
+                let g = Arc::clone(&global);
+                let p = Arc::clone(&p);
+                let addr = addr.clone();
+                let load = load.clone();
+                let payload = payload.clone();
 
-            let handle = if let Some(ref ns) = client_ns {
-                let ns_name = ns.clone();
-                let pair_id = pair.id.clone();
-                tokio::spawn(async move {
-                    info!(%pair_id, %ns_name, %protocol, "Pair worker starting (NS mode)");
-                    let _ = tokio::task::spawn_blocking(move || {
-                        run_pair_in_ns(
-                            test_type, &addr, protocol, payload, load,
-                            g, p, rx, duration_secs, &ns_name,
-                        )
+                let (tx, rx) = oneshot::channel();
+                self.shutdown_txs.push(tx);
+
+                let handle = if let Some(ref ns) = client_ns {
+                    let ns_name = ns.clone();
+                    let pair_id = pair.id.clone();
+                    tokio::spawn(async move {
+                        info!(%pair_id, %ns_name, %protocol, worker_idx, "Pair worker starting (NS mode)");
+                        let _ = tokio::task::spawn_blocking(move || {
+                            run_pair_in_ns(
+                                test_type, &addr, protocol, payload, load,
+                                g, p, rx, duration_secs, &ns_name,
+                            )
+                        })
+                        .await;
                     })
-                    .await;
-                })
-            } else {
-                let pair_id = pair.id.clone();
-                tokio::spawn(async move {
-                    info!(%pair_id, %protocol, "Pair worker starting (local mode)");
-                    run_pair(test_type, &addr, protocol, payload, load, g, p, rx, duration_secs).await;
-                })
-            };
+                } else {
+                    let pair_id = pair.id.clone();
+                    tokio::spawn(async move {
+                        info!(%pair_id, %protocol, worker_idx, "Pair worker starting (local mode)");
+                        run_pair(test_type, &addr, protocol, payload, load, g, p, rx, duration_secs).await;
+                    })
+                };
 
-            self.handles.push(handle);
+                self.handles.push(handle);
+            }
         }
     }
 

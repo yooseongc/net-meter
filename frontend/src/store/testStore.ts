@@ -205,6 +205,10 @@ export const useTestStore = create<TestStore>((set, get) => ({
           if (ev.type === 'test_stopped' || ev.type === 'ramp_up_complete') {
             get().fetchStatus()
           }
+          // 시험 종료 시 결과 자동 갱신 (서버가 저장 완료할 시간을 줌)
+          if (ev.type === 'test_stopped') {
+            setTimeout(() => get().fetchResults(), 600)
+          }
         },
         () => {
           esInstance = null

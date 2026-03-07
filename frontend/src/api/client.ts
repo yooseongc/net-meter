@@ -72,6 +72,7 @@ export interface PairConfig {
   protocol: Protocol
   payload: PayloadProfile
   load?: LoadConfig
+  client_count?: number
 }
 
 export interface NsConfig {

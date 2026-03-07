@@ -258,7 +258,12 @@ pub struct PairConfig {
     /// pair별 부하 설정. None이면 TestConfig.default_load 사용.
     #[serde(default)]
     pub load: Option<LoadConfig>,
+    /// 이 pair에 대해 병렬로 실행할 클라이언트 워커 수 (기본 1)
+    #[serde(default = "default_one")]
+    pub client_count: u32,
 }
+
+fn default_one() -> u32 { 1 }
 
 impl PairConfig {
     /// 유효 부하 설정 반환 (pair 개별 설정 > 글로벌 기본값)
@@ -335,6 +340,7 @@ impl TestConfig {
             protocol: Protocol::Http1,
             payload: PayloadProfile::Http(HttpPayload::default()),
             load: None,
+            client_count: 1,
         };
         Self {
             id: uuid::Uuid::new_v4().to_string(),

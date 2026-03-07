@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use net_meter_core::{HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::Collector;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
@@ -123,7 +124,7 @@ async fn run_cc(
         let me = method.clone();
         let pa = path.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_loop(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
         }));
     }
 
@@ -163,7 +164,7 @@ async fn run_bw(
         let me = method.clone();
         let pa = path.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_loop(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
         }));
     }
 
@@ -296,10 +297,10 @@ async fn send_and_receive(
 }
 
 // ---------------------------------------------------------------------------
-// CC/BW 워커
+// CC/BW 워커: TCP 연결을 재사용하는 keep-alive 세션
 // ---------------------------------------------------------------------------
 
-async fn keep_alive_loop(
+async fn keep_alive_session(
     addr: &str,
     method: &str,
     path: &str,
@@ -312,10 +313,151 @@ async fn keep_alive_loop(
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
-        single_request(addr, method, path, req_body_bytes,
-            Arc::clone(&global), Arc::clone(&proto),
-            connect_timeout, response_timeout).await;
+
+        // 새 TCP 연결 수립
+        record_attempt(&global, &proto);
+        let connect_start = Instant::now();
+        let stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => {
+                let us = connect_start.elapsed().as_micros() as u64;
+                record_established(&global, &proto);
+                global.record_connect_latency(us);
+                proto.record_connect_latency(us);
+                s
+            }
+            Ok(Err(e)) => {
+                debug!(addr, error = %e, "HTTP/1.1 connect failed");
+                record_failed(&global, &proto);
+                continue;
+            }
+            Err(_) => {
+                debug!(addr, "HTTP/1.1 connect timed out");
+                record_failed(&global, &proto);
+                record_timeout(&global, &proto);
+                continue;
+            }
+        };
+
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        // 동일 TCP 연결에서 keep-alive 반복 요청
+        loop {
+            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+            let total_start = Instant::now();
+            let result = timeout(
+                response_timeout,
+                do_keepalive_request(&mut reader, &mut write_half, addr, method, path, req_body_bytes, &global, &proto),
+            ).await;
+
+            match result {
+                Ok(Ok((status, bytes_rx, reuse))) => {
+                    let total_us = total_start.elapsed().as_micros() as u64;
+                    record_response(&global, &proto, status, bytes_rx, total_us);
+                    if !reuse { break; }
+                }
+                Ok(Err(e)) => {
+                    debug!(addr, error = %e, "HTTP/1.1 keep-alive IO error");
+                    break;
+                }
+                Err(_) => {
+                    debug!(addr, "HTTP/1.1 keep-alive response timed out");
+                    record_timeout(&global, &proto);
+                    break;
+                }
+            }
+        }
+
+        record_closed(&global, &proto);
     }
+}
+
+/// 기존 TCP 연결에서 HTTP/1.1 요청 1회 수행.
+/// 반환: (status_code, rx_bytes, 연결_재사용_가능)
+async fn do_keepalive_request(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+    host: &str,
+    method: &str,
+    path: &str,
+    req_body_bytes: usize,
+    global: &Arc<Collector>,
+    proto: &Arc<Collector>,
+) -> std::io::Result<(u16, u64, bool)> {
+    // 요청 전송
+    let header = if req_body_bytes > 0 {
+        format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: net-meter/0.1\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+            method, path, host, req_body_bytes
+        )
+    } else {
+        format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: net-meter/0.1\r\n\r\n",
+            method, path, host
+        )
+    };
+    writer.write_all(header.as_bytes()).await?;
+    if req_body_bytes > 0 {
+        let body = vec![0u8; req_body_bytes];
+        writer.write_all(&body).await?;
+    }
+    let tx = (header.len() + req_body_bytes) as u64;
+    global.record_request(tx);
+    proto.record_request(tx);
+
+    // 응답 헤더 파싱
+    let ttfb_start = Instant::now();
+    let mut status_code: u16 = 0;
+    let mut content_length: Option<usize> = None;
+    let mut server_keep_alive = true;
+    let mut first_line = true;
+    let mut total_rx: u64 = 0;
+
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed"));
+        }
+        total_rx += n as u64;
+
+        if first_line {
+            let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
+            global.record_ttfb(ttfb_us);
+            proto.record_ttfb(ttfb_us);
+            // "HTTP/1.1 200 OK" 에서 상태코드 파싱
+            status_code = line.split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            first_line = false;
+        }
+
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() { break; } // 헤더 끝 (빈 줄)
+
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("content-length:") {
+            content_length = trimmed[15..].trim().parse().ok();
+        } else if lower.starts_with("connection:") {
+            server_keep_alive = trimmed[11..].trim().to_lowercase() != "close";
+        }
+    }
+
+    // Content-Length 바디 읽기
+    let reuse = if let Some(len) = content_length {
+        if len > 0 {
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).await?;
+            total_rx += len as u64;
+        }
+        server_keep_alive // Content-Length 알 때만 연결 재사용 가능
+    } else {
+        false // chunked 또는 미지정: 연결 닫기
+    };
+
+    Ok((status_code, total_rx, reuse))
 }
 
 // ---------------------------------------------------------------------------

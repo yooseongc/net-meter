@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useTestStore } from './store/testStore'
 import Dashboard from './components/Dashboard'
+import TestControl from './components/TestControl'
 import TopologyView from './components/TopologyView'
 import ProfileManager from './components/ProfileManager'
 import Results from './components/Results'
 
-type Tab = 'dashboard' | 'topology' | 'profiles' | 'results'
+type Tab = 'monitor' | 'config' | 'topology' | 'profiles' | 'results'
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('dashboard')
+  const [tab, setTab] = useState<Tab>('monitor')
   const { connectWs, fetchStatus, fetchProfiles, fetchResults } = useTestStore()
 
   useEffect(() => {
@@ -22,7 +23,8 @@ export default function App() {
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header tab={tab} setTab={setTab} />
       <main style={styles.main}>
-        {tab === 'dashboard' && <Dashboard />}
+        {tab === 'monitor' && <Dashboard />}
+        {tab === 'config' && <TestControl />}
         {tab === 'topology' && <TopologyView />}
         {tab === 'profiles' && <ProfileManager />}
         {tab === 'results' && <Results />}
@@ -37,14 +39,14 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 
   const isRunning =
     testState === 'running' || testState === 'preparing' || testState === 'stopping' || testState === 'ramping_up'
-  const isIdle = testState === 'idle' || testState === 'completed' || testState === 'failed'
 
   const { latestSnapshot, eventLog } = useTestStore()
   const hasViolations = (latestSnapshot?.threshold_violations?.length ?? 0) > 0
   const unreadWarnings = eventLog.filter(e => e.level === 'warn' || e.level === 'error').length
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'monitor', label: 'Monitor' },
+    { id: 'config', label: 'Config' },
     { id: 'topology', label: 'Topology' },
     { id: 'profiles', label: 'Profiles' },
     { id: 'results', label: 'Results' },
@@ -105,15 +107,6 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         {isRunning && (
           <button className="btn-danger" onClick={stopTest} style={{ padding: '6px 14px', fontSize: 13 }}>
             Stop
-          </button>
-        )}
-        {isIdle && !activeProfile && (
-          <button
-            className="btn-secondary"
-            onClick={() => setTab('dashboard')}
-            style={{ padding: '6px 14px', fontSize: 13 }}
-          >
-            New Test
           </button>
         )}
 

@@ -150,6 +150,10 @@ function PairDialog({
             <Field label="IP (NS mode)" unit="optional">
               <input value={p.client.ip ?? ''} placeholder="auto" onChange={(e) => setClientField('ip', e.target.value)} />
             </Field>
+            <Field label="Workers" unit="병렬 클라이언트 수">
+              <input type="number" min={1} max={64} value={p.client_count ?? 1}
+                onChange={(e) => setP((prev) => ({ ...prev, client_count: Math.max(1, Number(e.target.value)) }))} />
+            </Field>
           </div>
           <div>
             <div style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', marginBottom: 6, textTransform: 'uppercase' }}>Server</div>
