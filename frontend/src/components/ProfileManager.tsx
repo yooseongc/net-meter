@@ -3,8 +3,8 @@ import { TestConfig } from '../api/client'
 import { useTestStore } from '../store/testStore'
 
 function configSummary(c: TestConfig): string {
-  const protos = [...new Set(c.pairs.map((p) => p.protocol.toUpperCase()))].join('/')
-  return `${c.test_type.toUpperCase()} · ${protos} · ${c.pairs.length} pair(s) · ${c.duration_secs}s`
+  const protos = [...new Set(c.associations.map((a) => a.protocol.toUpperCase()))].join('/')
+  return `${c.test_type.toUpperCase()} · ${protos} · ${c.associations.length} association(s) · ${c.duration_secs}s`
 }
 
 export default function ProfileManager({ onLoadConfig }: { onLoadConfig?: (c: TestConfig) => void }) {
@@ -54,8 +54,8 @@ export default function ProfileManager({ onLoadConfig }: { onLoadConfig?: (c: Te
 
               {expanded === c.id && (
                 <div style={{ borderTop: '1px solid #21262d', paddingTop: 8 }}>
-                  {/* Pairs table */}
-                  <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 6 }}>PAIRS</div>
+                  {/* Associations table */}
+                  <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 6 }}>ASSOCIATIONS</div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
                       <tr style={{ color: '#8b949e' }}>
@@ -66,19 +66,19 @@ export default function ProfileManager({ onLoadConfig }: { onLoadConfig?: (c: Te
                       </tr>
                     </thead>
                     <tbody>
-                      {c.pairs.map((pair) => (
-                        <tr key={pair.id} style={{ borderTop: '1px solid #21262d' }}>
+                      {c.associations.map((assoc) => (
+                        <tr key={assoc.id} style={{ borderTop: '1px solid #21262d' }}>
                           <td style={{ padding: '4px 6px', color: '#58a6ff', fontWeight: 600 }}>
-                            {pair.protocol.toUpperCase()}
+                            {assoc.protocol.toUpperCase()}
                           </td>
                           <td style={{ padding: '4px 6px', color: '#8b949e' }}>
-                            {pair.client.id}{pair.client.ip ? ` (${pair.client.ip})` : ''}
+                            {assoc.client_net.base_ip}/{assoc.client_net.prefix_len ?? 24}
                           </td>
                           <td style={{ padding: '4px 6px', color: '#8b949e' }}>
-                            {pair.server.ip ?? '0.0.0.0'}:{pair.server.port}
+                            {assoc.server.ip ?? '0.0.0.0'}:{assoc.server.port}
                           </td>
                           <td style={{ padding: '4px 6px', color: '#484f58' }}>
-                            {pair.load ? 'custom' : 'default'}
+                            {assoc.load ? 'custom' : 'default'}
                           </td>
                         </tr>
                       ))}

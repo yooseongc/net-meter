@@ -1,10 +1,11 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use net_meter_core::{LoadConfig, TcpPayload, TestType};
 use net_meter_metrics::Collector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use tracing::debug;
@@ -19,11 +20,26 @@ pub async fn run(
     proto: Arc<Collector>,
     shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
 ) {
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline).await,
+        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, src_ip).await,
+        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, src_ip).await,
+        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, src_ip).await,
+    }
+}
+
+/// src_ip를 bind한 TCP 연결 수립
+async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    if let Some(src) = src_ip {
+        let server_addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let sock = TcpSocket::new_v4()?;
+        sock.bind(SocketAddr::new(src, 0))?;
+        sock.connect(server_addr).await
+    } else {
+        TcpStream::connect(addr).await
     }
 }
 
@@ -39,6 +55,7 @@ async fn run_cps(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
 ) {
     let target_cps = load.effective_cps();
     let max_inflight = load.effective_max_inflight() as usize;
@@ -82,7 +99,7 @@ async fn run_cps(
                 let a = addr.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    tcp_pingpong(&a, tx_bytes, rx_bytes, g, p, connect_to, response_to).await;
+                    tcp_pingpong(&a, tx_bytes, rx_bytes, g, p, connect_to, response_to, src_ip).await;
                 });
             }
         }
@@ -101,6 +118,7 @@ async fn run_cc(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
 ) {
     let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -114,7 +132,7 @@ async fn run_cc(
         let p = Arc::clone(&proto);
         let a = addr.clone();
         handles.push(tokio::spawn(async move {
-            tcp_stream_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline).await;
+            tcp_stream_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline, src_ip).await;
         }));
     }
 
@@ -137,8 +155,8 @@ async fn run_bw(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
 ) {
-    // BW는 CC와 동일한 구조. payload 크기로 처리량을 결정한다.
     let concurrency = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
     let tx_bytes = payload.tx_bytes;
@@ -151,7 +169,7 @@ async fn run_bw(
         let p = Arc::clone(&proto);
         let a = addr.clone();
         handles.push(tokio::spawn(async move {
-            tcp_stream_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline).await;
+            tcp_stream_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline, src_ip).await;
         }));
     }
 
@@ -174,12 +192,13 @@ async fn tcp_pingpong(
     proto: Arc<Collector>,
     connect_timeout: Duration,
     response_timeout: Duration,
+    src_ip: Option<IpAddr>,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+    let stream = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
         Ok(Ok(s)) => {
             let us = connect_start.elapsed().as_micros() as u64;
             record_established(&global, &proto);
@@ -209,7 +228,6 @@ async fn tcp_pingpong(
     match result {
         Ok(Ok(bytes_rx)) => {
             let total_us = total_start.elapsed().as_micros() as u64;
-            // TCP에서는 "응답"을 0 status로 기록
             record_response(&global, &proto, 0, bytes_rx, total_us);
         }
         Ok(Err(e)) => debug!(addr, error = %e, "TCP IO error"),
@@ -228,7 +246,6 @@ async fn do_pingpong(
     global: &Arc<Collector>,
     proto: &Arc<Collector>,
 ) -> std::io::Result<u64> {
-    // 요청 전송
     if tx_bytes > 0 {
         let buf = vec![0u8; tx_bytes];
         stream.write_all(&buf).await?;
@@ -237,7 +254,6 @@ async fn do_pingpong(
         proto.record_request(tx);
     }
 
-    // 응답 수신
     let ttfb_start = Instant::now();
     let mut total_rx = 0u64;
     let mut buf = vec![0u8; 65536];
@@ -270,13 +286,14 @@ async fn tcp_stream_worker(
     proto: Arc<Collector>,
     connect_timeout: Duration,
     deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let mut stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+        let mut stream = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
             Ok(Ok(s)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
@@ -299,7 +316,6 @@ async fn tcp_stream_worker(
             }
         };
 
-        // 스트리밍 루프: deadline까지 전송/수신 반복
         let chunk = if tx_bytes > 0 { vec![0u8; tx_bytes] } else { vec![] };
         let mut rx_buf = if rx_bytes > 0 { vec![0u8; rx_bytes.max(65536)] } else { vec![] };
 
@@ -322,7 +338,7 @@ async fn tcp_stream_worker(
 
                 while received < rx_bytes {
                     match stream.read(&mut rx_buf[received..]).await {
-                        Ok(0) => { break; } // EOF
+                        Ok(0) => { break; }
                         Ok(n) => {
                             if first {
                                 let ttfb_us = first_byte_start.elapsed().as_micros() as u64;
@@ -338,11 +354,9 @@ async fn tcp_stream_worker(
                 let total_us = total_start.elapsed().as_micros() as u64;
                 record_response(&global, &proto, 0, received as u64, total_us);
             } else if !chunk.is_empty() {
-                // tx만 있는 경우 (응답 없는 스트리밍)
                 let total_us = total_start.elapsed().as_micros() as u64;
                 record_response(&global, &proto, 0, 0, total_us);
             } else {
-                // tx/rx 모두 없는 경우: 연결 유지만 (keep-alive idle)
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
@@ -352,7 +366,7 @@ async fn tcp_stream_worker(
 }
 
 // ---------------------------------------------------------------------------
-// 헬퍼: 이중 Collector 기록
+// 헬퍼
 // ---------------------------------------------------------------------------
 
 #[inline]

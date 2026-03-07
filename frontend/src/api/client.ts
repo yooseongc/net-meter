@@ -3,6 +3,8 @@
 export type TestType = 'cps' | 'bw' | 'cc'
 export type Protocol = 'tcp' | 'http1' | 'http2'
 export type HttpMethod = 'GET' | 'POST'
+export type NetworkMode = 'loopback' | 'namespace' | 'external_port'
+export type VlanProto = 'dot1_q' | 'dot1_ad'
 export type TestState =
   | 'idle'
   | 'preparing'
@@ -35,13 +37,15 @@ export interface HttpPayload {
 export type PayloadProfile = TcpPayload | HttpPayload
 
 // ---------------------------------------------------------------------------
-// Load, Endpoint, Pair
+// Load (per-client 기준)
 // ---------------------------------------------------------------------------
 
 export interface LoadConfig {
-  target_cps?: number
-  target_cc?: number
-  max_inflight?: number
+  /** [CPS] 클라이언트 1개당 초당 연결 수. 전체 CPS = client_count × cps_per_client */
+  cps_per_client?: number
+  /** [CC/BW] 클라이언트 1개당 동시 연결 수. 전체 CC = client_count × cc_per_client */
+  cc_per_client?: number
+  max_inflight_per_client?: number
   connect_timeout_ms?: number
   response_timeout_ms?: number
   ramp_up_secs?: number
@@ -54,10 +58,20 @@ export interface Thresholds {
   auto_stop_on_fail?: boolean
 }
 
-export interface ClientEndpoint {
-  id: string
-  ip?: string
+// ---------------------------------------------------------------------------
+// 클라이언트 IP 대역
+// ---------------------------------------------------------------------------
+
+export interface ClientNet {
+  base_ip: string
+  /** 클라이언트 IP 수 (= 워커 수). undefined이면 total_clients 기준 자동 계산 */
+  count?: number
+  prefix_len?: number
 }
+
+// ---------------------------------------------------------------------------
+// 서버 엔드포인트
+// ---------------------------------------------------------------------------
 
 export interface ServerEndpoint {
   id: string
@@ -65,25 +79,60 @@ export interface ServerEndpoint {
   port: number
 }
 
-export interface PairConfig {
+// ---------------------------------------------------------------------------
+// VLAN 설정
+// ---------------------------------------------------------------------------
+
+export interface VlanConfig {
+  outer_vid: number
+  inner_vid?: number
+  outer_proto?: VlanProto
+}
+
+// ---------------------------------------------------------------------------
+// Association (구 PairConfig)
+// ---------------------------------------------------------------------------
+
+export interface Association {
   id: string
-  client: ClientEndpoint
+  name: string
+  client_net: ClientNet
   server: ServerEndpoint
   protocol: Protocol
   payload: PayloadProfile
-  load?: LoadConfig
-  client_count?: number
   tls?: boolean
+  load?: LoadConfig
+  vlan?: VlanConfig
 }
 
-export interface NsConfig {
-  use_namespace: boolean
+// ---------------------------------------------------------------------------
+// 네트워크 설정
+// ---------------------------------------------------------------------------
+
+export interface NsOptions {
   netns_prefix: string
+}
+
+export interface ExternalPortOptions {
+  client_iface: string
+  server_iface: string
+  client_gateway?: string
+  client_gateway_mac?: string
+  server_gateway?: string
+  server_gateway_mac?: string
+  flush_iface_addrs?: boolean
+  cleanup_addrs?: boolean
+}
+
+export interface NetworkConfig {
+  mode: NetworkMode
+  ns: NsOptions
+  ext?: ExternalPortOptions
   tcp_quickack: boolean
 }
 
 // ---------------------------------------------------------------------------
-// TestConfig (replaces TestProfile)
+// TestConfig
 // ---------------------------------------------------------------------------
 
 export interface TestConfig {
@@ -91,9 +140,11 @@ export interface TestConfig {
   name: string
   test_type: TestType
   duration_secs: number
+  /** 전체 가상 클라이언트 수. associations 간 균등 분배. 0이면 각 association의 count 사용 */
+  total_clients: number
   default_load: LoadConfig
-  pairs: PairConfig[]
-  ns_config: NsConfig
+  associations: Association[]
+  network: NetworkConfig
   thresholds?: Thresholds
 }
 

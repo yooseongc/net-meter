@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use net_meter_core::{PayloadProfile, Protocol, TestConfig, TestState};
+use net_meter_core::{NetworkMode, PayloadProfile, Protocol, TestConfig, TestState};
 use net_meter_generator::Generator;
 use net_meter_metrics::Collector;
 use net_meter_ns::NamespaceManager;
@@ -36,8 +36,8 @@ impl Orchestrator {
     /// 시험을 시작한다.
     ///
     /// 1. 프로토콜별 Collector 생성 및 MultiAggregator 등록
-    /// 2. TLS pair 존재 시 자체 서명 인증서 생성
-    /// 3. NS 모드 또는 로컬 모드로 분기
+    /// 2. TLS association 존재 시 자체 서명 인증서 생성
+    /// 3. NetworkMode에 따라 모드 분기
     pub async fn start(&mut self, config: TestConfig, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Preparing;
         *state.active_config.write().await = Some(config.clone());
@@ -64,11 +64,11 @@ impl Orchestrator {
         }
         *state.protocol_metrics.write().await = proto_collectors.clone();
 
-        // TLS pair 존재 시 자체 서명 인증서 번들 생성
-        let has_tls_pair = config.pairs.iter().any(|p| {
-            p.tls && matches!(p.protocol, Protocol::Http1 | Protocol::Http2)
+        // TLS association 존재 시 자체 서명 인증서 번들 생성
+        let has_tls = config.associations.iter().any(|a| {
+            a.tls && matches!(a.protocol, Protocol::Http1 | Protocol::Http2)
         });
-        let tls_bundle = if has_tls_pair {
+        let tls_bundle = if has_tls {
             match crate::tls::build() {
                 Ok(b) => {
                     info!("TLS bundle ready (self-signed cert)");
@@ -87,9 +87,9 @@ impl Orchestrator {
 
         info!(
             config_name = %config.name,
-            pairs = config.pairs.len(),
-            use_namespace = config.ns_config.use_namespace,
-            tls = has_tls_pair,
+            associations = config.associations.len(),
+            network_mode = ?config.network.mode,
+            tls = has_tls,
             "Starting test"
         );
         let _ = state.event_tx.send(TestEvent::TestStarted {
@@ -98,29 +98,39 @@ impl Orchestrator {
             duration_secs: config.duration_secs,
         });
 
-        if config.ns_config.use_namespace {
-            match self
-                .start_ns_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(error = %e, "Failed to start test in namespace mode");
-                    *state.test_state.write().await = TestState::Failed;
-                    let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+        match config.network.mode {
+            NetworkMode::Namespace => {
+                match self
+                    .start_ns_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(error = %e, "Failed to start test in namespace mode");
+                        *state.test_state.write().await = TestState::Failed;
+                        let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+                    }
                 }
             }
-        } else {
-            match self
-                .start_local_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(error = %e, "Failed to start test in local mode");
-                    *state.test_state.write().await = TestState::Failed;
-                    let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+            NetworkMode::Loopback => {
+                match self
+                    .start_local_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(error = %e, "Failed to start test in local mode");
+                        *state.test_state.write().await = TestState::Failed;
+                        let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+                    }
                 }
+            }
+            NetworkMode::ExternalPort => {
+                error!("ExternalPort mode is not yet implemented (Phase 11)");
+                *state.test_state.write().await = TestState::Failed;
+                let _ = state.event_tx.send(TestEvent::Error {
+                    message: "ExternalPort mode not implemented (planned for Phase 11)".to_string(),
+                });
             }
         }
     }
@@ -133,7 +143,7 @@ impl Orchestrator {
         state: Arc<AppState>,
         tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
-        let tcp_quickack = config.ns_config.tcp_quickack;
+        let tcp_quickack = config.network.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
         let pair_addrs = config.local_server_addrs();
 
@@ -142,28 +152,27 @@ impl Orchestrator {
 
         // 고유 server_id별로 Responder 하나씩 시작
         let mut started: HashSet<String> = HashSet::new();
-        for pair in &config.pairs {
-            if !started.insert(pair.server.id.clone()) {
+        for assoc in &config.associations {
+            if !started.insert(assoc.server.id.clone()) {
                 continue;
             }
-            let bind_ip = pair.server.ip.as_deref().unwrap_or("0.0.0.0");
-            let bind_addr: SocketAddr = format!("{}:{}", bind_ip, pair.server.port)
+            let bind_ip = assoc.server.ip.as_deref().unwrap_or("0.0.0.0");
+            let bind_addr: SocketAddr = format!("{}:{}", bind_ip, assoc.server.port)
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid server addr: {}", e))?;
 
             let proto_col = proto_collectors
-                .get(&pair.protocol)
+                .get(&assoc.protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
-            // pair.tls가 true일 때만 ServerConfig 전달
-            let pair_server_tls = if pair.tls { server_tls.clone() } else { None };
+            let pair_server_tls = if assoc.tls { server_tls.clone() } else { None };
 
             self.responder
                 .start_server(
                     bind_addr,
-                    pair.protocol,
-                    &pair.payload,
+                    assoc.protocol,
+                    &assoc.payload,
                     Arc::clone(&global),
                     proto_col,
                     tcp_quickack,
@@ -175,8 +184,10 @@ impl Orchestrator {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
+        // 로컬 모드: client IP 바인딩 없음
+        let empty_client_ips = HashMap::new();
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls)
+            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls, &empty_client_ips)
             .await;
 
         self.transition_to_running(config, state).await;
@@ -193,28 +204,32 @@ impl Orchestrator {
     ) -> anyhow::Result<()> {
         net_meter_ns::check_capability().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let mut ns = NamespaceManager::new(&config.ns_config.netns_prefix);
+        let mut ns = NamespaceManager::new(&config.network.ns.netns_prefix);
         ns.setup().await.map_err(|e| anyhow::anyhow!("{}", e))?;
         let _ = state.event_tx.send(TestEvent::NsSetupComplete);
 
-        let (pair_addrs, server_binds) = ns
-            .assign_pair_addrs(&config.pairs)
+        let (pair_addrs, server_binds, client_ip_lists) = ns
+            .setup_associations(&config.associations, config.total_clients)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        // client_ip_lists: String → Vec<String> 파싱
+        let client_ips: HashMap<String, Vec<String>> = client_ip_lists;
+
         let client_ns_name = ns.client_ns.clone();
         let server_ns_name = ns.server_ns.clone();
-        let tcp_quickack = config.ns_config.tcp_quickack;
+        let tcp_quickack = config.network.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
 
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
         let client_tls = tls_bundle.map(|b| b.client_config);
 
+        // server_id → (protocol, payload, tls)
         let mut server_proto_map: HashMap<String, (Protocol, PayloadProfile, bool)> = HashMap::new();
-        for pair in &config.pairs {
+        for assoc in &config.associations {
             server_proto_map
-                .entry(pair.server.id.clone())
-                .or_insert_with(|| (pair.protocol, pair.payload.clone(), pair.tls));
+                .entry(assoc.server.id.clone())
+                .or_insert_with(|| (assoc.protocol, assoc.payload.clone(), assoc.tls));
         }
 
         for (server_id, bind_addr_str) in &server_binds {
@@ -252,7 +267,7 @@ impl Orchestrator {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_tls)
+            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_tls, &client_ips)
             .await;
 
         self.ns_manager = Some(ns);

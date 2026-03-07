@@ -49,7 +49,7 @@ async fn start_handler(
         ));
     }
 
-    info!(config_name = %config.name, pairs = config.pairs.len(), "Received start request");
+    info!(config_name = %config.name, associations = config.associations.len(), "Received start request");
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {

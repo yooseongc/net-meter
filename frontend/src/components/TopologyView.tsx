@@ -134,8 +134,8 @@ export default function TopologyView() {
   const { testState, activeProfile, latestSnapshot: snap } = useTestStore()
 
   const isRunning = testState === 'running'
-  const useNs = activeProfile?.ns_config.use_namespace ?? false
-  const prefix = activeProfile?.ns_config.netns_prefix ?? 'nm'
+  const useNs = activeProfile?.network.mode === 'namespace'
+  const prefix = activeProfile?.network.ns.netns_prefix ?? 'nm'
 
   const clientStats = snap
     ? [
@@ -223,7 +223,7 @@ export default function TopologyView() {
             <NodeBox
               title="Generator"
               subtitle="HTTP/1.1 Client"
-              ip={`→ ${activeProfile?.pairs[0]?.server.ip ?? '127.0.0.1'}:${activeProfile?.pairs[0]?.server.port ?? 8080}`}
+              ip={`→ ${activeProfile?.associations[0]?.server.ip ?? '127.0.0.1'}:${activeProfile?.associations[0]?.server.port ?? 8080}`}
               stats={clientStats}
               active={isRunning}
             />
@@ -231,7 +231,7 @@ export default function TopologyView() {
             <NodeBox
               title="Responder"
               subtitle="HTTP Server"
-              ip={`0.0.0.0:${activeProfile?.pairs[0]?.server.port ?? 8080}`}
+              ip={`0.0.0.0:${activeProfile?.associations[0]?.server.port ?? 8080}`}
               stats={serverStats}
               active={isRunning}
             />

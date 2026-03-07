@@ -83,7 +83,7 @@ export default function TestRunPanel({
         )}
         {activeProfile && (
           <div style={{ fontSize: 11, color: '#8b949e' }}>
-            {activeProfile.test_type.toUpperCase()} · {activeProfile.pairs.length} pair(s)
+            {activeProfile.test_type.toUpperCase()} · {activeProfile.associations.length} association(s)
           </div>
         )}
 

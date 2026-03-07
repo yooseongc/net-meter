@@ -1,3 +1,4 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -5,7 +6,7 @@ use net_meter_core::{HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::Collector;
 use rustls::ClientConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use tokio_rustls::TlsConnector;
@@ -26,11 +27,26 @@ pub async fn run(
     shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, tls).await,
-        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, tls).await,
-        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, tls).await,
+        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
+    }
+}
+
+/// src_ip를 bind한 TCP 연결 수립
+async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpStream> {
+    if let Some(src) = src_ip {
+        let server_addr: SocketAddr = addr
+            .parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let sock = TcpSocket::new_v4()?;
+        sock.bind(SocketAddr::new(src, 0))?;
+        sock.connect(server_addr).await
+    } else {
+        TcpStream::connect(addr).await
     }
 }
 
@@ -47,6 +63,7 @@ async fn run_cps(
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     let target_cps = load.effective_cps();
     let max_inflight = load.effective_max_inflight() as usize;
@@ -94,7 +111,7 @@ async fn run_cps(
                 let tls = tls.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to, tls).await;
+                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to, tls, src_ip).await;
                 });
             }
         }
@@ -114,6 +131,7 @@ async fn run_cc(
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -132,7 +150,7 @@ async fn run_cc(
         let pa = path.clone();
         let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls, src_ip).await;
         }));
     }
 
@@ -156,6 +174,7 @@ async fn run_bw(
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     let concurrency = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -174,7 +193,7 @@ async fn run_bw(
         let pa = path.clone();
         let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls, src_ip).await;
         }));
     }
 
@@ -199,12 +218,13 @@ async fn single_request(
     connect_timeout: Duration,
     response_timeout: Duration,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let tcp = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+    let tcp = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(addr, error = %e, "HTTP/1.1 connect failed");
@@ -349,13 +369,14 @@ async fn keep_alive_session(
     response_timeout: Duration,
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let tcp = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+        let tcp = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 debug!(addr, error = %e, "HTTP/1.1 connect failed");

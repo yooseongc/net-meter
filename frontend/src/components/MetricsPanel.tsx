@@ -56,8 +56,8 @@ function MetricCell({
 
 function MetricsTable({ snap, profile }: { snap: MetricsSnapshot; profile: TestConfig | null }) {
   const succ = successRate(snap)
-  const targetCps = profile?.test_type === 'cps' ? profile.default_load.target_cps : undefined
-  const targetCc = profile?.default_load.target_cc
+  const targetCps = profile?.test_type === 'cps' ? profile.default_load.cps_per_client : undefined
+  const targetCc = profile?.default_load.cc_per_client
 
   const cpsPct = targetCps ? (snap.cps / targetCps) * 100 : undefined
   const ccPct = targetCc ? (snap.active_connections / targetCc) * 100 : undefined
@@ -328,8 +328,8 @@ export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<Cha
   }
 
   const chartData = buildChartData(history)
-  const targetCps = profile?.test_type === 'cps' ? profile.default_load.target_cps : undefined
-  const targetCc = profile?.default_load.target_cc
+  const targetCps = profile?.test_type === 'cps' ? profile.default_load.cps_per_client : undefined
+  const targetCc = profile?.default_load.cc_per_client
   const violations = snap.threshold_violations ?? []
   const isRampingUp = snap.is_ramping_up ?? false
 

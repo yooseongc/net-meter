@@ -14,7 +14,7 @@
 | Booster | TCP 프로토콜, 다중 Pair 토폴로지, TestConfig 전면 전환 | ✅ 완료 |
 | 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | ✅ 완료 |
 | 9 | ~~eBPF/XDP 옵션~~ | 취소 |
-| 10 | Association 기반 설정 전환 + VLAN 지원 | 설계 완료, 미구현 |
+| 10 | Association 기반 설정 전환 + VLAN 지원 | ✅ 완료 |
 | 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | 설계 완료, 미구현 |
 
 ---
@@ -350,20 +350,48 @@ npm run build → ✓ built in 2.48s
 
 ---
 
-## Phase 10: Association 기반 설정 전환 + VLAN 지원 (설계 완료)
+## Phase 10: Association 기반 설정 전환 + VLAN 지원 ✅
 
 **목표:** Avalanche 스타일 "클라이언트 수 기반 설정", IP 대역 지정, VLAN 단일/이중 태그 지원
 
-상세 설계: `docs/design-next.md`
+**달성 사항:**
 
-**핵심 변경:**
-- `PairConfig` → `Association` (ClientNet IP 대역 + VlanConfig 추가)
-- `TestConfig.total_clients: u32` 추가 (associations 간 균등 분배)
-- `LoadConfig`: `target_cps/cc` (시스템 전체 기준) → `cps_per_client / cc_per_client` (per-client 기준)
-- `NsConfig` → `NetworkConfig { mode: NetworkMode, ns: NsOptions, ext: Option<ExternalPortOptions> }`
-- `VlanConfig { outer_vid, inner_vid, outer_proto: VlanProto }` — single/QinQ 모두 지원
-- `ns/src/veth.rs`: `assign_client_ips()`, `add_vlan_subif()`, `add_qinq_subif()` 추가
-- Generator: per-client IP bind 소켓 (`bind(src_ip, 0)`)
+### 1. 핵심 타입 전환 (engine/crates/core/src/config.rs)
+- [x] `PairConfig` → **`Association`**: `client_net: ClientNet`, `server: ServerEndpoint`, `vlan: Option<VlanConfig>`
+- [x] `ClientEndpoint` → **`ClientNet`**: `base_ip`, `count: Option<u32>`, `prefix_len: u8`
+- [x] `NsConfig` → **`NetworkConfig`**: `mode: NetworkMode`, `ns: NsOptions`, `ext: Option<ExternalPortOptions>`
+- [x] **`NetworkMode`**: `Loopback | Namespace | ExternalPort` enum
+- [x] **`VlanConfig`**: `outer_vid`, `inner_vid: Option<u16>`, `outer_proto: VlanProto`
+- [x] **`VlanProto`**: `Dot1Q | Dot1AD`
+- [x] **`LoadConfig`**: `cps_per_client` (alias: target_cps), `cc_per_client` (alias: target_cc), `max_inflight_per_client` (alias: max_inflight)
+- [x] **`TestConfig.total_clients: u32`** — associations 간 균등 분배
+- [x] **`TestConfig.associations`** (alias: pairs), **`TestConfig.network`** (alias: ns_config) — 역호환 serde alias
+
+### 2. NS 관리 개편 (engine/crates/ns/)
+- [x] **`assign_client_ips_in_ns()`**: base_ip + count 기반 다중 IP 앨리어스 할당 (이미 존재하면 무시)
+- [x] **`add_vlan_subif_in_ns()`**: 단일 VLAN 태그 subif 생성
+- [x] **`add_qinq_subif_in_ns()`**: QinQ (이중 태그) subif 생성
+- [x] **`setup_associations()`**: `assign_pair_addrs()` 대체 — VLAN subif 처리, client IP 목록 반환
+  - 반환: `(pair_addrs, server_binds, client_ip_lists: HashMap<String, Vec<String>>)`
+
+### 3. Generator per-client IP 바인딩 (engine/crates/generator/)
+- [x] `start()` 파라미터에 `client_ips: &HashMap<String, Vec<String>>` 추가
+- [x] IP 목록이 있으면 각 IP마다 worker 1개 생성 (총 워커 = IP 수)
+- [x] TCP/HTTP1/HTTP2 모든 프로토콜: `src_ip: Option<IpAddr>` 파라미터로 `TcpSocket::bind()` 소켓 바인딩
+
+### 4. Orchestrator 개편 (engine/crates/control/src/orchestrator.rs)
+- [x] `ns_config.use_namespace` → `network.mode == NetworkMode::Namespace` 분기
+- [x] `ExternalPort` → 미구현 오류 반환 (Phase 11)
+- [x] `setup_associations()` 호출 및 `client_ips` Generator에 전달
+
+### 5. Frontend 전면 개편
+- [x] **`api/client.ts`**: 모든 타입 Phase 10으로 전환 (Association, ClientNet, VlanConfig, NetworkConfig 등)
+- [x] **`TestControl.tsx`** (완전 재작성): AssociationDialog (ClientNet, VLAN 설정), total_clients, NetworkMode 선택
+- [x] **`TopologyView.tsx`**: `ns_config.use_namespace` → `network.mode === 'namespace'`, `pairs[0]` → `associations[0]`
+- [x] **`MetricsPanel.tsx`**: `target_cps` → `cps_per_client`, `target_cc` → `cc_per_client`
+- [x] **`ProfileManager.tsx`**: `pairs` → `associations`, client 컬럼에 base_ip/prefix_len 표시
+- [x] **`Results.tsx`**: `pairs` → `associations`
+- [x] **`TestRunPanel.tsx`**: `pairs.length pair(s)` → `associations.length association(s)`
 
 **VLAN 구현 방식 (Linux):**
 ```bash
@@ -374,6 +402,12 @@ ip link add link veth-c1 name veth-c1.100 type vlan id 100 proto 802.1ad
 ip link add link veth-c1.100 name veth-c1.100.200 type vlan id 200 proto 802.1Q
 ```
 커널 모듈 `8021q` 필요.
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 3.86s
+npm run build → ✓ built in 2.63s
+```
 
 ---
 

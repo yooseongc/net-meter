@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import {
   TestConfig, TestType, Protocol, HttpMethod,
-  PairConfig, PayloadProfile, LoadConfig, NsConfig,
-  TcpPayload, HttpPayload, Thresholds,
+  Association, PayloadProfile, LoadConfig, NetworkConfig, NetworkMode,
+  TcpPayload, HttpPayload, Thresholds, VlanConfig,
 } from '../api/client'
 import { useTestStore } from '../store/testStore'
 import { v4 as uuidv4 } from 'uuid'
@@ -22,12 +22,19 @@ const defaultTcpPayload = (): TcpPayload => ({
 const defaultPayloadForProtocol = (proto: Protocol): PayloadProfile =>
   proto === 'tcp' ? defaultTcpPayload() : defaultHttpPayload()
 
-const defaultPair = (idx: number): PairConfig => ({
+const defaultAssociation = (idx: number): Association => ({
   id: uuidv4(),
-  client: { id: `client-${idx}` },
+  name: `assoc-${idx}`,
+  client_net: { base_ip: `10.10.1.${idx + 1}`, prefix_len: 24 },
   server: { id: `server-${idx}`, port: 8080 },
   protocol: 'http1',
   payload: defaultHttpPayload(),
+})
+
+const defaultNetworkConfig = (): NetworkConfig => ({
+  mode: 'loopback',
+  ns: { netns_prefix: 'nm' },
+  tcp_quickack: false,
 })
 
 const defaultConfig = (): TestConfig => ({
@@ -35,9 +42,10 @@ const defaultConfig = (): TestConfig => ({
   name: 'New Test',
   test_type: 'cps',
   duration_secs: 30,
-  default_load: { target_cps: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
-  pairs: [defaultPair(0)],
-  ns_config: { use_namespace: false, netns_prefix: 'nm', tcp_quickack: false },
+  total_clients: 0,
+  default_load: { cps_per_client: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
+  associations: [defaultAssociation(0)],
+  network: defaultNetworkConfig(),
   thresholds: {},
 })
 
@@ -80,22 +88,22 @@ function Field({ label, unit, children }: { label: string; unit?: string; childr
 }
 
 // ---------------------------------------------------------------------------
-// Pair 편집 다이얼로그
+// Association 편집 다이얼로그
 // ---------------------------------------------------------------------------
 
-function PairDialog({
-  pair,
+function AssociationDialog({
+  assoc,
   onSave,
   onCancel,
 }: {
-  pair: PairConfig
-  onSave: (p: PairConfig) => void
+  assoc: Association
+  onSave: (a: Association) => void
   onCancel: () => void
 }) {
-  const [p, setP] = useState<PairConfig>({ ...pair })
+  const [a, setA] = useState<Association>({ ...assoc })
 
   const setProtocol = (proto: Protocol) => {
-    setP((prev) => ({
+    setA((prev) => ({
       ...prev,
       protocol: proto,
       payload: defaultPayloadForProtocol(proto),
@@ -103,82 +111,118 @@ function PairDialog({
   }
 
   const setPayloadField = (key: string, val: unknown) =>
-    setP((prev) => ({ ...prev, payload: { ...prev.payload, [key]: val } as PayloadProfile }))
+    setA((prev) => ({ ...prev, payload: { ...prev.payload, [key]: val } as PayloadProfile }))
 
-  const setClientField = (key: keyof PairConfig['client'], val: string) =>
-    setP((prev) => ({ ...prev, client: { ...prev.client, [key]: val || undefined } }))
+  const setClientNetField = (key: keyof Association['client_net'], val: string | number | undefined) =>
+    setA((prev) => ({ ...prev, client_net: { ...prev.client_net, [key]: val } }))
 
-  const setServerField = (key: keyof PairConfig['server'], val: string | number) =>
-    setP((prev) => ({ ...prev, server: { ...prev.server, [key]: val === '' ? undefined : val } }))
+  const setServerField = (key: keyof Association['server'], val: string | number) =>
+    setA((prev) => ({ ...prev, server: { ...prev.server, [key]: val === '' ? undefined : val } }))
 
-  const [useLoadOverride, setUseLoadOverride] = useState(!!p.load)
-  const [loadOverride, setLoadOverride] = useState<LoadConfig>(p.load ?? {})
-
+  const [useLoadOverride, setUseLoadOverride] = useState(!!a.load)
+  const [loadOverride, setLoadOverride] = useState<LoadConfig>(a.load ?? {})
   const setLoadField = (key: keyof LoadConfig, raw: string) => {
     const n = raw === '' ? undefined : Number(raw)
     setLoadOverride((prev) => ({ ...prev, [key]: n }))
   }
 
+  const [useVlan, setUseVlan] = useState(!!a.vlan)
+  const [vlan, setVlan] = useState<VlanConfig>(a.vlan ?? { outer_vid: 100 })
+  const setVlanField = (key: keyof VlanConfig, val: unknown) =>
+    setVlan((prev) => ({ ...prev, [key]: val }))
+
   const handleSave = () => {
-    onSave({ ...p, load: useLoadOverride ? loadOverride : undefined })
+    onSave({
+      ...a,
+      load: useLoadOverride ? loadOverride : undefined,
+      vlan: useVlan ? vlan : undefined,
+    })
   }
 
-  const isTcp = p.protocol === 'tcp'
-  const payload = p.payload as (TcpPayload & { type?: string }) | (HttpPayload & { type?: string })
+  const isTcp = a.protocol === 'tcp'
+  const payload = a.payload as (TcpPayload & { type?: string }) | (HttpPayload & { type?: string })
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-      <div className="card" style={{ width: 500, maxHeight: '90vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div className="card-title" style={{ margin: 0 }}>Edit Pair</div>
+      <div className="card" style={{ width: 540, maxHeight: '92vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="card-title" style={{ margin: 0 }}>Edit Association</div>
 
-        {/* Protocol */}
-        <Field label="Protocol">
-          <select value={p.protocol} onChange={(e) => setProtocol(e.target.value as Protocol)}>
-            <option value="tcp">TCP</option>
-            <option value="http1">HTTP/1.1</option>
-            <option value="http2">HTTP/2</option>
-          </select>
-        </Field>
-
-        {/* Endpoints */}
+        {/* Name & Protocol */}
         <Row>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', marginBottom: 6, textTransform: 'uppercase' }}>Client</div>
-            <Field label="ID">
-              <input value={p.client.id} onChange={(e) => setClientField('id', e.target.value)} />
-            </Field>
-            <Field label="IP (NS mode)" unit="optional">
-              <input value={p.client.ip ?? ''} placeholder="auto" onChange={(e) => setClientField('ip', e.target.value)} />
-            </Field>
-            <Field label="Workers" unit="병렬 클라이언트 수">
-              <input type="number" min={1} max={64} value={p.client_count ?? 1}
-                onChange={(e) => setP((prev) => ({ ...prev, client_count: Math.max(1, Number(e.target.value)) }))} />
-            </Field>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', marginBottom: 6, textTransform: 'uppercase' }}>Server</div>
-            <Field label="ID">
-              <input value={p.server.id} onChange={(e) => setServerField('id', e.target.value)} />
-            </Field>
-            <Row>
-              <Field label="IP" unit="optional">
-                <input value={p.server.ip ?? ''} placeholder="0.0.0.0" onChange={(e) => setServerField('ip', e.target.value)} />
-              </Field>
-              <Field label="Port">
-                <input type="number" value={p.server.port} onChange={(e) => setServerField('port', Number(e.target.value))} />
-              </Field>
-            </Row>
-          </div>
+          <Field label="Name">
+            <input value={a.name} onChange={(e) => setA((prev) => ({ ...prev, name: e.target.value }))} />
+          </Field>
+          <Field label="Protocol">
+            <select value={a.protocol} onChange={(e) => setProtocol(e.target.value as Protocol)}>
+              <option value="tcp">TCP</option>
+              <option value="http1">HTTP/1.1</option>
+              <option value="http2">HTTP/2</option>
+            </select>
+          </Field>
         </Row>
 
-        {/* TLS (HTTP only) */}
+        {/* Client Net */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#58a6ff', marginBottom: 6, textTransform: 'uppercase' }}>Client IP Range</div>
+          <Row>
+            <Field label="Base IP">
+              <input
+                value={a.client_net.base_ip}
+                placeholder="10.10.1.1"
+                onChange={(e) => setClientNetField('base_ip', e.target.value)}
+              />
+            </Field>
+            <Field label="Count (workers)" unit="blank=auto">
+              <input
+                type="number" min={1}
+                value={a.client_net.count ?? ''}
+                placeholder="auto"
+                onChange={(e) => setClientNetField('count', e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)))}
+              />
+            </Field>
+          </Row>
+          <div style={{ marginTop: 6 }}>
+            <Field label="Prefix Length" unit="/24">
+              <input
+                type="number" min={8} max={32}
+                value={a.client_net.prefix_len ?? 24}
+                onChange={(e) => setClientNetField('prefix_len', Number(e.target.value))}
+              />
+            </Field>
+          </div>
+          <div style={{ fontSize: 11, color: '#484f58', marginTop: 4 }}>
+            {a.client_net.count
+              ? `${a.client_net.count}개 워커: ${a.client_net.base_ip} ~ (base_ip+${a.client_net.count - 1})`
+              : 'Count: total_clients / associations.len() 자동 계산 (0이면 1)'}
+          </div>
+        </div>
+
+        {/* Server */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', marginBottom: 6, textTransform: 'uppercase' }}>Server Endpoint</div>
+          <Row>
+            <Field label="Server ID">
+              <input value={a.server.id} onChange={(e) => setServerField('id', e.target.value)} />
+            </Field>
+            <Field label="Port">
+              <input type="number" value={a.server.port} onChange={(e) => setServerField('port', Number(e.target.value))} />
+            </Field>
+          </Row>
+          <div style={{ marginTop: 6 }}>
+            <Field label="Server IP" unit="blank=auto (NS: 10.20.1.N / local: 127.0.0.1)">
+              <input value={a.server.ip ?? ''} placeholder="auto" onChange={(e) => setServerField('ip', e.target.value)} />
+            </Field>
+          </div>
+        </div>
+
+        {/* TLS */}
         {!isTcp && (
           <Field label="TLS">
             <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input type="checkbox" checked={p.tls ?? false}
-                onChange={(e) => setP((prev) => ({ ...prev, tls: e.target.checked }))}
+              <input type="checkbox" checked={a.tls ?? false}
+                onChange={(e) => setA((prev) => ({ ...prev, tls: e.target.checked }))}
                 style={{ width: 'auto' }} />
-              Enable TLS (self-signed cert, HTTP/1.1 HTTPS / HTTP/2 over TLS)
+              Enable TLS (self-signed cert)
             </label>
           </Field>
         )}
@@ -232,7 +276,7 @@ function PairDialog({
                   placeholder="none"
                   onChange={(e) => setPayloadField('path_extra_bytes', e.target.value === '' ? undefined : Number(e.target.value))} />
               </Field>
-              {p.protocol === 'http2' && (
+              {a.protocol === 'http2' && (
                 <Field label="Max Streams" unit="BW mode">
                   <input type="number" value={(payload as HttpPayload).h2_max_concurrent_streams ?? 10}
                     onChange={(e) => setPayloadField('h2_max_concurrent_streams', Number(e.target.value))} />
@@ -242,21 +286,51 @@ function PairDialog({
           </>
         )}
 
+        {/* VLAN */}
+        <div style={{ borderTop: '1px solid #21262d', paddingTop: 8 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <input type="checkbox" checked={useVlan} onChange={(e) => setUseVlan(e.target.checked)} style={{ width: 'auto' }} />
+            VLAN tagging
+          </label>
+          {useVlan && (
+            <>
+              <Row>
+                <Field label="Outer VID" unit="1–4094">
+                  <input type="number" min={1} max={4094} value={vlan.outer_vid}
+                    onChange={(e) => setVlanField('outer_vid', Number(e.target.value))} />
+                </Field>
+                <Field label="Inner VID" unit="QinQ (blank=off)">
+                  <input type="number" min={1} max={4094} value={vlan.inner_vid ?? ''}
+                    placeholder="none"
+                    onChange={(e) => setVlanField('inner_vid', e.target.value === '' ? undefined : Number(e.target.value))} />
+                </Field>
+              </Row>
+              <Field label="Outer EtherType">
+                <select value={vlan.outer_proto ?? 'dot1_q'}
+                  onChange={(e) => setVlanField('outer_proto', e.target.value)}>
+                  <option value="dot1_q">802.1Q (0x8100)</option>
+                  <option value="dot1_ad">802.1ad QinQ (0x88a8)</option>
+                </select>
+              </Field>
+            </>
+          )}
+        </div>
+
         {/* Load override */}
         <div style={{ borderTop: '1px solid #21262d', paddingTop: 8 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <input type="checkbox" checked={useLoadOverride} onChange={(e) => setUseLoadOverride(e.target.checked)} style={{ width: 'auto' }} />
-            Override load settings for this pair
+            Override load settings for this association
           </label>
           {useLoadOverride && (
             <Row>
-              <Field label="Target CPS" unit="/s">
-                <input type="number" value={loadOverride.target_cps ?? ''} placeholder="default"
-                  onChange={(e) => setLoadField('target_cps', e.target.value)} />
+              <Field label="CPS per Client" unit="/s">
+                <input type="number" value={loadOverride.cps_per_client ?? ''} placeholder="default"
+                  onChange={(e) => setLoadField('cps_per_client', e.target.value)} />
               </Field>
-              <Field label="Target CC">
-                <input type="number" value={loadOverride.target_cc ?? ''} placeholder="default"
-                  onChange={(e) => setLoadField('target_cc', e.target.value)} />
+              <Field label="CC per Client">
+                <input type="number" value={loadOverride.cc_per_client ?? ''} placeholder="default"
+                  onChange={(e) => setLoadField('cc_per_client', e.target.value)} />
               </Field>
             </Row>
           )}
@@ -264,7 +338,7 @@ function PairDialog({
 
         {/* Actions */}
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn-primary" onClick={handleSave} style={{ flex: 1 }}>Save Pair</button>
+          <button className="btn-primary" onClick={handleSave} style={{ flex: 1 }}>Save Association</button>
           <button className="btn-secondary" onClick={onCancel} style={{ flex: 1 }}>Cancel</button>
         </div>
       </div>
@@ -279,13 +353,12 @@ function PairDialog({
 export default function TestControl() {
   const { testState, startTest, stopTest, savedProfiles, saveProfile, draftConfig, setDraftConfig } = useTestStore()
   const [config, setConfig] = useState<TestConfig>(defaultConfig)
-  const [editingPair, setEditingPair] = useState<PairConfig | null>(null)
-  const [isNewPair, setIsNewPair] = useState(false)
+  const [editingAssoc, setEditingAssoc] = useState<Association | null>(null)
+  const [isNewAssoc, setIsNewAssoc] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
-  const isRunning = testState === 'running' || testState === 'preparing' || testState === 'stopping'
+  const isRunning = testState === 'running' || testState === 'preparing' || testState === 'stopping' || testState === 'ramping_up'
 
-  // Profiles 탭에서 "Load" 클릭 시 draftConfig가 설정되면 적용
   useEffect(() => {
     if (draftConfig) {
       setConfig({ ...draftConfig })
@@ -301,36 +374,55 @@ export default function TestControl() {
     setConfig((prev) => ({ ...prev, default_load: { ...prev.default_load, [key]: n } }))
   }
 
-  const setNsField = <K extends keyof NsConfig>(key: K, val: NsConfig[K]) =>
-    setConfig((prev) => ({ ...prev, ns_config: { ...prev.ns_config, [key]: val } }))
+  const setNetworkField = <K extends keyof NetworkConfig>(key: K, val: NetworkConfig[K]) =>
+    setConfig((prev) => ({ ...prev, network: { ...prev.network, [key]: val } }))
 
   const setThresholdField = (key: keyof Thresholds, raw: string | boolean) => {
     const val = typeof raw === 'boolean' ? raw : (raw === '' ? undefined : Number(raw))
     setConfig((prev) => ({ ...prev, thresholds: { ...prev.thresholds, [key]: val } }))
   }
 
-  // Pairs
-  const handleAddPair = () => {
-    const newPair = defaultPair(config.pairs.length)
-    setIsNewPair(true)
-    setEditingPair(newPair)
+  // Estimated total load
+  const estimatedCps = (() => {
+    if (config.test_type !== 'cps') return null
+    const cpsPerClient = config.default_load.cps_per_client ?? 100
+    const totalClients = config.total_clients > 0
+      ? config.total_clients
+      : config.associations.reduce((sum, a) => sum + (a.client_net.count ?? 1), 0)
+    return cpsPerClient * totalClients
+  })()
+
+  const estimatedCc = (() => {
+    if (config.test_type !== 'cc' && config.test_type !== 'bw') return null
+    const ccPerClient = config.default_load.cc_per_client ?? 50
+    const totalClients = config.total_clients > 0
+      ? config.total_clients
+      : config.associations.reduce((sum, a) => sum + (a.client_net.count ?? 1), 0)
+    return ccPerClient * totalClients
+  })()
+
+  // Associations
+  const handleAddAssoc = () => {
+    const newAssoc = defaultAssociation(config.associations.length)
+    setIsNewAssoc(true)
+    setEditingAssoc(newAssoc)
   }
 
-  const handleEditPair = (pair: PairConfig) => {
-    setIsNewPair(false)
-    setEditingPair({ ...pair })
+  const handleEditAssoc = (assoc: Association) => {
+    setIsNewAssoc(false)
+    setEditingAssoc({ ...assoc })
   }
 
-  const handleDeletePair = (id: string) => {
-    setConfig((prev) => ({ ...prev, pairs: prev.pairs.filter((p) => p.id !== id) }))
+  const handleDeleteAssoc = (id: string) => {
+    setConfig((prev) => ({ ...prev, associations: prev.associations.filter((a) => a.id !== id) }))
   }
 
-  const handleSavePair = (saved: PairConfig) => {
+  const handleSaveAssoc = (saved: Association) => {
     setConfig((prev) => {
-      if (isNewPair) return { ...prev, pairs: [...prev.pairs, saved] }
-      return { ...prev, pairs: prev.pairs.map((p) => (p.id === saved.id ? saved : p)) }
+      if (isNewAssoc) return { ...prev, associations: [...prev.associations, saved] }
+      return { ...prev, associations: prev.associations.map((a) => (a.id === saved.id ? saved : a)) }
     })
-    setEditingPair(null)
+    setEditingAssoc(null)
   }
 
   const loadProfile = (id: string) => {
@@ -363,15 +455,15 @@ export default function TestControl() {
   }
 
   const protoLabel = (p: Protocol) => p === 'tcp' ? 'TCP' : p === 'http1' ? 'HTTP/1.1' : 'HTTP/2'
+  const modeLabel = (m: NetworkMode) => m === 'loopback' ? 'Loopback' : m === 'namespace' ? 'Namespace' : 'External Port'
 
   return (
     <>
-      {/* Pair 편집 다이얼로그 */}
-      {editingPair && (
-        <PairDialog
-          pair={editingPair}
-          onSave={handleSavePair}
-          onCancel={() => setEditingPair(null)}
+      {editingAssoc && (
+        <AssociationDialog
+          assoc={editingAssoc}
+          onSave={handleSaveAssoc}
+          onCancel={() => setEditingAssoc(null)}
         />
       )}
 
@@ -429,20 +521,33 @@ export default function TestControl() {
                 onChange={(e) => setField('duration_secs', Number(e.target.value))} />
             </Field>
           </Row>
+          <Field label="Total Clients" unit="0=각 association별 count 사용">
+            <input type="number" min={0} value={config.total_clients}
+              onChange={(e) => setField('total_clients', Number(e.target.value))} />
+          </Field>
         </Section>
 
         {/* DEFAULT LOAD */}
-        <Section title="Default Load" defaultOpen>
+        <Section title="Default Load (per client)" defaultOpen>
           {config.test_type === 'cps' ? (
-            <Field label="Target CPS" unit="/s">
-              <input type="number" value={config.default_load.target_cps ?? 100}
-                onChange={(e) => setLoadField('target_cps', e.target.value)} />
+            <Field label="CPS per Client" unit="/s · 전체 CPS = clients × cps_per_client">
+              <input type="number" value={config.default_load.cps_per_client ?? 100}
+                onChange={(e) => setLoadField('cps_per_client', e.target.value)} />
             </Field>
           ) : (
-            <Field label="Target Concurrent Connections">
-              <input type="number" value={config.default_load.target_cc ?? 50}
-                onChange={(e) => setLoadField('target_cc', e.target.value)} />
+            <Field label="CC per Client" unit="전체 CC = clients × cc_per_client">
+              <input type="number" value={config.default_load.cc_per_client ?? 50}
+                onChange={(e) => setLoadField('cc_per_client', e.target.value)} />
             </Field>
+          )}
+          {/* 예상 전체 부하 */}
+          {(estimatedCps !== null || estimatedCc !== null) && (
+            <div style={{ fontSize: 11, color: '#8b949e', background: '#161b22', borderRadius: 6, padding: '6px 10px' }}>
+              예상 전체 부하:&nbsp;
+              <span style={{ color: '#58a6ff', fontWeight: 700 }}>
+                {estimatedCps !== null ? `~${estimatedCps.toLocaleString()} CPS` : `~${estimatedCc?.toLocaleString()} CC`}
+              </span>
+            </div>
           )}
           <Row>
             <Field label="Connect Timeout" unit="ms">
@@ -454,10 +559,10 @@ export default function TestControl() {
                 onChange={(e) => setLoadField('response_timeout_ms', e.target.value)} />
             </Field>
           </Row>
-          <Field label="Max In-flight" unit="blank=auto">
-            <input type="number" value={config.default_load.max_inflight ?? ''}
+          <Field label="Max In-flight per Client" unit="blank=auto">
+            <input type="number" value={config.default_load.max_inflight_per_client ?? ''}
               placeholder="auto"
-              onChange={(e) => setLoadField('max_inflight', e.target.value)} />
+              onChange={(e) => setLoadField('max_inflight_per_client', e.target.value)} />
           </Field>
           <Field label="Ramp-up" unit="sec (0=off)">
             <input type="number" value={config.default_load.ramp_up_secs ?? 0}
@@ -469,7 +574,7 @@ export default function TestControl() {
         {/* THRESHOLDS */}
         <Section title="Thresholds / Alarm" defaultOpen={false}>
           <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
-            임계값 초과 시 대시보드에 경고가 표시됩니다. auto_stop 활성화 시 시험을 자동 중단합니다.
+            임계값 초과 시 대시보드에 경고가 표시됩니다. auto_stop 활성화 시 자동 중단합니다.
           </div>
           <Row>
             <Field label="Min CPS" unit="/s (blank=off)">
@@ -497,63 +602,76 @@ export default function TestControl() {
           </label>
         </Section>
 
-        {/* NS CONFIG */}
+        {/* NETWORK */}
         <Section title="Network" defaultOpen={false}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <input type="checkbox" checked={config.ns_config.use_namespace}
-              onChange={(e) => setNsField('use_namespace', e.target.checked)}
-              style={{ width: 'auto' }} />
-            Use Network Namespace (requires root / CAP_NET_ADMIN)
-          </label>
-          {config.ns_config.use_namespace && (
+          <Field label="Mode">
+            <select value={config.network.mode}
+              onChange={(e) => setNetworkField('mode', e.target.value as NetworkMode)}>
+              <option value="loopback">Loopback (localhost, 개발/검증용)</option>
+              <option value="namespace">Namespace (Linux netns, CAP_NET_ADMIN 필요)</option>
+              <option value="external_port">External Port (Phase 11, 미구현)</option>
+            </select>
+          </Field>
+          {config.network.mode === 'namespace' && (
             <Field label="NS Prefix">
-              <input value={config.ns_config.netns_prefix}
-                onChange={(e) => setNsField('netns_prefix', e.target.value)} />
+              <input value={config.network.ns.netns_prefix}
+                onChange={(e) => setNetworkField('ns', { ...config.network.ns, netns_prefix: e.target.value })} />
             </Field>
           )}
+          {config.network.mode === 'external_port' && (
+            <div style={{ fontSize: 11, color: '#d29922', padding: '6px 10px', background: '#161b22', borderRadius: 6 }}>
+              ⚠ External Port 모드는 Phase 11에서 구현 예정입니다.
+            </div>
+          )}
           <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <input type="checkbox" checked={config.ns_config.tcp_quickack}
-              onChange={(e) => setNsField('tcp_quickack', e.target.checked)}
+            <input type="checkbox" checked={config.network.tcp_quickack}
+              onChange={(e) => setNetworkField('tcp_quickack', e.target.checked)}
               style={{ width: 'auto' }} />
             TCP_QUICKACK (disable delayed ACK)
           </label>
         </Section>
 
-        {/* PAIRS */}
-        <Section title={`Pairs (${config.pairs.length})`} defaultOpen>
+        {/* ASSOCIATIONS */}
+        <Section title={`Associations (${config.associations.length}) — Mode: ${modeLabel(config.network.mode)}`} defaultOpen>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ color: '#8b949e', textAlign: 'left' }}>
+                  <th style={{ padding: '4px 6px' }}>Name</th>
                   <th style={{ padding: '4px 6px' }}>Protocol</th>
-                  <th style={{ padding: '4px 6px' }}>Client</th>
+                  <th style={{ padding: '4px 6px' }}>Client Net</th>
                   <th style={{ padding: '4px 6px' }}>Server</th>
                   <th style={{ padding: '4px 6px' }}>Load</th>
                   <th style={{ padding: '4px 6px', width: 90 }}></th>
                 </tr>
               </thead>
               <tbody>
-                {config.pairs.map((pair) => (
-                  <tr key={pair.id} style={{ borderTop: '1px solid #21262d' }}>
+                {config.associations.map((assoc) => (
+                  <tr key={assoc.id} style={{ borderTop: '1px solid #21262d' }}>
+                    <td style={{ padding: '5px 6px', color: '#e6edf3' }}>
+                      {assoc.name || assoc.id.slice(0, 8)}
+                      {assoc.vlan && <span style={{ fontSize: 10, color: '#bc8cff', marginLeft: 4 }}>VLAN {assoc.vlan.outer_vid}</span>}
+                    </td>
                     <td style={{ padding: '5px 6px', fontWeight: 600, color: '#58a6ff' }}>
-                      {protoLabel(pair.protocol)}
+                      {protoLabel(assoc.protocol)}
+                      {assoc.tls && <span style={{ fontSize: 10, color: '#d29922', marginLeft: 4 }}>TLS</span>}
+                    </td>
+                    <td style={{ padding: '5px 6px', color: '#8b949e', fontFamily: 'monospace', fontSize: 11 }}>
+                      {assoc.client_net.base_ip}
+                      {assoc.client_net.count ? `×${assoc.client_net.count}` : '×auto'}
                     </td>
                     <td style={{ padding: '5px 6px', color: '#8b949e' }}>
-                      {pair.client.id}
-                      {pair.client.ip && <span style={{ color: '#484f58' }}> ({pair.client.ip})</span>}
-                    </td>
-                    <td style={{ padding: '5px 6px', color: '#8b949e' }}>
-                      {pair.server.id} — {pair.server.ip ?? '0.0.0.0'}:{pair.server.port}
+                      {assoc.server.id} — {assoc.server.ip ?? '0.0.0.0'}:{assoc.server.port}
                     </td>
                     <td style={{ padding: '5px 6px', color: '#484f58' }}>
-                      {pair.load ? 'custom' : 'default'}
+                      {assoc.load ? 'custom' : 'default'}
                     </td>
                     <td style={{ padding: '5px 6px' }}>
                       <div style={{ display: 'flex', gap: 4 }}>
-                        <button className="btn-secondary" onClick={() => handleEditPair(pair)}
+                        <button className="btn-secondary" onClick={() => handleEditAssoc(assoc)}
                           style={{ padding: '2px 8px', fontSize: 11 }}>Edit</button>
-                        <button className="btn-danger" onClick={() => handleDeletePair(pair.id)}
-                          disabled={config.pairs.length <= 1}
+                        <button className="btn-danger" onClick={() => handleDeleteAssoc(assoc.id)}
+                          disabled={config.associations.length <= 1}
                           style={{ padding: '2px 8px', fontSize: 11 }}>✕</button>
                       </div>
                     </td>
@@ -562,16 +680,16 @@ export default function TestControl() {
               </tbody>
             </table>
           </div>
-          <button className="btn-secondary" onClick={handleAddPair}
+          <button className="btn-secondary" onClick={handleAddAssoc}
             style={{ alignSelf: 'flex-start', padding: '4px 12px', fontSize: 12 }}>
-            + Add Pair
+            + Add Association
           </button>
         </Section>
 
         {/* Start / Stop */}
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
           <button className="btn-primary" onClick={() => startTest(config)}
-            disabled={isRunning || config.pairs.length === 0} style={{ flex: 1 }}>
+            disabled={isRunning || config.associations.length === 0} style={{ flex: 1 }}>
             {isRunning ? 'Running…' : 'Start Test'}
           </button>
           <button className="btn-danger" onClick={stopTest} disabled={!isRunning} style={{ flex: 1 }}>
