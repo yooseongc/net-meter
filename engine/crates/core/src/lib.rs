@@ -5,5 +5,5 @@ pub mod state;
 
 pub use error::NetMeterError;
 pub use profile::{HttpMethod, Protocol, TestProfile, TestType};
-pub use snapshot::MetricsSnapshot;
+pub use snapshot::{HistogramBucket, MetricsSnapshot};
 pub use state::TestState;

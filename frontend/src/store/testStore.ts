@@ -2,20 +2,23 @@ import { create } from 'zustand'
 import {
   MetricsSnapshot,
   TestProfile,
+  TestResult,
   TestState,
   api,
   connectMetricsWs,
 } from '../api/client'
 
-const MAX_HISTORY = 120 // 최대 120초 분량 히스토리
+const MAX_HISTORY = 300 // 최대 5분 분량 히스토리
 
 interface TestStore {
   // 상태
   testState: TestState
   activeProfile: TestProfile | null
+  elapsedSecs: number | null
   latestSnapshot: MetricsSnapshot | null
   snapshotHistory: MetricsSnapshot[]
   savedProfiles: TestProfile[]
+  testResults: TestResult[]
   wsConnected: boolean
   error: string | null
 
@@ -26,6 +29,8 @@ interface TestStore {
   fetchProfiles: () => Promise<void>
   saveProfile: (profile: TestProfile) => Promise<void>
   deleteProfile: (id: string) => Promise<void>
+  fetchResults: () => Promise<void>
+  deleteResult: (id: string) => Promise<void>
   connectWs: () => void
   disconnectWs: () => void
 }
@@ -35,9 +40,11 @@ let wsInstance: WebSocket | null = null
 export const useTestStore = create<TestStore>((set, get) => ({
   testState: 'idle',
   activeProfile: null,
+  elapsedSecs: null,
   latestSnapshot: null,
   snapshotHistory: [],
   savedProfiles: [],
+  testResults: [],
   wsConnected: false,
   error: null,
 
@@ -47,6 +54,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
       set({
         testState: status.state,
         activeProfile: status.profile,
+        elapsedSecs: status.elapsed_secs,
         error: null,
       })
     } catch (e) {
@@ -57,7 +65,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
   startTest: async (profile) => {
     try {
       await api.startTest(profile)
-      set({ testState: 'preparing', activeProfile: profile, error: null })
+      set({ testState: 'preparing', activeProfile: profile, elapsedSecs: 0, error: null })
     } catch (e) {
       set({ error: String(e) })
     }
@@ -99,6 +107,26 @@ export const useTestStore = create<TestStore>((set, get) => ({
       set((s) => ({
         savedProfiles: s.savedProfiles.filter((p) => p.id !== id),
         error: null,
+      }))
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+
+  fetchResults: async () => {
+    try {
+      const results = await api.listResults()
+      set({ testResults: results, error: null })
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+
+  deleteResult: async (id) => {
+    try {
+      await api.deleteResult(id)
+      set((s) => ({
+        testResults: s.testResults.filter((r) => r.id !== id),
       }))
     } catch (e) {
       set({ error: String(e) })

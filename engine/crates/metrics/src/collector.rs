@@ -2,7 +2,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hdrhistogram::Histogram;
-use net_meter_core::MetricsSnapshot;
+use net_meter_core::{HistogramBucket, MetricsSnapshot};
+
+/// 히스토그램 버킷 상한 (µs)
+const BOUNDS_US: &[u64] = &[500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000];
+/// 위와 동일 (ms)
+const BOUNDS_MS: &[f64] = &[0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0];
 
 /// 1µs ~ 60s 범위, 3자리 유효숫자
 fn new_hist() -> Histogram<u64> {
@@ -155,6 +160,7 @@ impl Collector {
         let (lat_mean, lat_p50, lat_p95, lat_p99, lat_max) = read_hist(&self.latency_hist);
         let (conn_mean, _, _, conn_p99, _) = read_hist(&self.connect_hist);
         let (ttfb_mean, _, _, ttfb_p99, _) = read_hist(&self.ttfb_hist);
+        let latency_histogram = extract_buckets(&self.latency_hist);
 
         MetricsSnapshot {
             timestamp_secs,
@@ -182,6 +188,7 @@ impl Collector {
             connect_p99_ms: conn_p99,
             ttfb_mean_ms: ttfb_mean,
             ttfb_p99_ms: ttfb_p99,
+            latency_histogram,
             // 율(rate)은 Aggregator가 채움
             cps: 0.0,
             rps: 0.0,
@@ -245,4 +252,37 @@ fn read_hist(hist: &Mutex<Histogram<u64>>) -> (f64, f64, f64, f64, f64) {
     } else {
         (0.0, 0.0, 0.0, 0.0, 0.0)
     }
+}
+
+/// Histogram에서 누적 버킷 벡터 추출 (Prometheus le 스타일)
+///
+/// 각 버킷은 해당 le_ms 이하의 누적 카운트를 담는다.
+/// BOUNDS_US 기준으로 버킷을 분류한 뒤 prefix-sum으로 누적값을 계산한다.
+fn extract_buckets(hist: &Mutex<Histogram<u64>>) -> Vec<HistogramBucket> {
+    let n = BOUNDS_US.len();
+    let mut counts = vec![0u64; n + 1]; // [각 bound 버킷] + [+Inf 버킷]
+
+    if let Ok(h) = hist.lock() {
+        if h.len() > 0 {
+            for v in h.iter_recorded() {
+                let val = v.value_iterated_to();
+                let cnt = v.count_at_value();
+                // val이 속하는 버킷 인덱스: 처음으로 bound >= val 인 위치
+                let idx = BOUNDS_US.partition_point(|&b| b < val);
+                counts[idx.min(n)] += cnt;
+            }
+            // prefix-sum → 누적 카운트
+            for i in 1..=n {
+                counts[i] += counts[i - 1];
+            }
+        }
+    }
+
+    let mut result: Vec<HistogramBucket> = BOUNDS_MS
+        .iter()
+        .zip(counts.iter())
+        .map(|(&le_ms, &count)| HistogramBucket { le_ms, count })
+        .collect();
+    result.push(HistogramBucket { le_ms: f64::INFINITY, count: counts[n] });
+    result
 }

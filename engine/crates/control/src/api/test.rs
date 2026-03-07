@@ -27,11 +27,16 @@ struct TestStatus {
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> {
     let test_state = *state.test_state.read().await;
     let profile = state.active_profile.read().await.clone();
+    let elapsed_secs = state
+        .test_start_time
+        .read()
+        .await
+        .map(|t| t.elapsed().as_secs());
 
     Json(TestStatus {
         state: test_state,
         profile,
-        elapsed_secs: None, // Phase 2에서 시작 시각 추적
+        elapsed_secs,
     })
 }
 

@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use net_meter_core::{TestProfile, TestState};
 use net_meter_generator::Generator;
@@ -7,6 +8,8 @@ use net_meter_metrics::Collector;
 use net_meter_ns::NamespaceManager;
 use net_meter_responder::Responder;
 use tracing::{error, info};
+
+use crate::result::TestResult;
 
 use crate::state::AppState;
 
@@ -38,6 +41,7 @@ impl Orchestrator {
     ) {
         *state.test_state.write().await = TestState::Preparing;
         *state.active_profile.write().await = Some(profile.clone());
+        *state.test_start_time.write().await = Some(Instant::now());
         metrics.reset();
 
         info!(profile_name = %profile.name, use_namespace = profile.use_namespace, "Starting test");
@@ -173,6 +177,36 @@ impl Orchestrator {
             ns.teardown().await;
         }
 
+        // 시험 결과 저장
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let start_instant = state.test_start_time.write().await.take();
+        let elapsed_secs = start_instant.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let started_at_secs = now_secs.saturating_sub(elapsed_secs);
+
+        let profile = state.active_profile.read().await.clone();
+        let final_snapshot = state.latest_snapshot.read().await.clone();
+
+        if let Some(profile) = profile {
+            let result = TestResult {
+                id: uuid::Uuid::new_v4().to_string(),
+                profile,
+                started_at_secs,
+                ended_at_secs: now_secs,
+                elapsed_secs,
+                final_snapshot,
+            };
+            let mut results = state.test_results.write().await;
+            results.insert(0, result); // 최신 순
+            if results.len() > 50 {
+                results.truncate(50); // 최대 50개 보존
+            }
+        }
+
+        *state.test_start_time.write().await = None;
         *state.test_state.write().await = TestState::Completed;
         info!("Test completed");
     }

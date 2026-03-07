@@ -1,6 +1,7 @@
 pub mod health;
 pub mod metrics;
 pub mod profiles;
+pub mod results;
 pub mod test;
 
 use std::path::PathBuf;
@@ -48,4 +49,5 @@ fn api_routes() -> Router<Arc<AppState>> {
         .merge(test::routes())
         .merge(metrics::routes())
         .merge(profiles::routes())
+        .merge(results::routes())
 }

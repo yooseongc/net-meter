@@ -30,8 +30,15 @@ export interface TestProfile {
   max_inflight?: number
   use_namespace?: boolean
   netns_prefix?: string
+  tcp_quickack?: boolean
+  path_extra_bytes?: number
   num_clients?: number
   num_servers?: number
+}
+
+export interface HistogramBucket {
+  le_ms: number   // +Inf = Infinity
+  count: number
 }
 
 export interface MetricsSnapshot {
@@ -39,6 +46,7 @@ export interface MetricsSnapshot {
   connections_attempted: number
   connections_established: number
   connections_failed: number
+  connections_timed_out: number
   active_connections: number
   requests_total: number
   responses_total: number
@@ -57,12 +65,28 @@ export interface MetricsSnapshot {
   latency_p95_ms: number
   latency_p99_ms: number
   latency_max_ms: number
+  connect_mean_ms: number
+  connect_p99_ms: number
+  ttfb_mean_ms: number
+  ttfb_p99_ms: number
+  server_requests: number
+  server_bytes_tx: number
+  latency_histogram: HistogramBucket[]
 }
 
 export interface TestStatus {
   state: TestState
   profile: TestProfile | null
   elapsed_secs: number | null
+}
+
+export interface TestResult {
+  id: string
+  profile: TestProfile
+  started_at_secs: number
+  ended_at_secs: number
+  elapsed_secs: number
+  final_snapshot: MetricsSnapshot
 }
 
 const BASE = '/api'
@@ -98,6 +122,9 @@ export const api = {
     }),
   deleteProfile: (id: string) =>
     fetch(`${BASE}/profiles/${id}`, { method: 'DELETE' }),
+  listResults: () => fetchJson<TestResult[]>('/results'),
+  deleteResult: (id: string) =>
+    fetch(`${BASE}/results/${id}`, { method: 'DELETE' }),
 }
 
 /// WebSocket 연결로 실시간 메트릭 스트림 구독

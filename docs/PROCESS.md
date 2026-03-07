@@ -138,15 +138,26 @@ DELETE /api/profiles/:id     → 프로파일 삭제
 
 ---
 
-## Phase 6: Frontend UI 고도화 (예정)
+## Phase 6: Frontend UI 고도화 ✅
 
-**목표:** 실제 운용 가능한 계측 콘솔 수준 UI
+**목표:** 실제 운용 가능한 계측 콘솔 수준 UI (Avalanche 참고)
 
-**작업 계획:**
-- [ ] 실시간 시계열 차트 (CPS, BW, latency p99)
-- [ ] 프로파일 편집기 (모든 TestProfile 필드 설정 가능)
-- [ ] namespace 모드 토글 UI
-- [ ] 시험 결과 리포트 다운로드 (JSON / CSV)
+**달성 사항:**
+- [x] **헤더 글로벌 컨트롤**: elapsed/remaining 시간 + progress bar + Stop 버튼 항상 노출
+- [x] **4탭 내비게이션**: Dashboard / Topology / Profiles / Results
+- [x] **TestControl Accordion 재편**: Basic / Load / HTTP / Timing / Network 섹션, 모든 TestProfile 필드 노출
+- [x] **Profile import/export**: JSON 파일로 저장/불러오기
+- [x] **대시보드 목표값 vs 실측값**: TargetCard (달성률 progress bar 포함)
+- [x] **차트 개선**: 목표선(ReferenceLine), Active Connections(Area), BW(Stacked Area), Latency 시계열
+- [x] **Latency Histogram 차트**: BarChart (구간별 카운트 + p50/p95/p99 표시)
+- [x] **Error Breakdown 패널**: 연결 실패/타임아웃/4xx/5xx 상세 분류
+- [x] **Topology 뷰**: Client NS ↔ Host ↔ Server NS 다이어그램 + 실시간 지표 오버레이
+- [x] **Results 탭**: 시험 결과 목록, 상세 펼침, JSON/CSV 다운로드
+- [x] **백엔드 API 확장**:
+  - `MetricsSnapshot`에 `latency_histogram: Vec<HistogramBucket>` 추가 (누적 버킷, 11개)
+  - `elapsed_secs` 실제 구현 (`test_start_time` 추적)
+  - `GET /api/results`, `DELETE /api/results/:id` 신규
+  - 시험 종료 시 `TestResult` 자동 저장 (최대 50개)
 
 ---
 

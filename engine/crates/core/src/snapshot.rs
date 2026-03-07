@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Latency 누적 히스토그램 버킷 (Prometheus le 스타일)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistogramBucket {
+    /// 상한 (ms). +Inf 버킷은 f64::INFINITY
+    pub le_ms: f64,
+    /// le_ms 이하 누적 요청 수
+    pub count: u64,
+}
+
 /// 특정 시점의 계측 지표 스냅샷 (직렬화 가능, 프론트엔드 전송용)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
@@ -49,4 +58,8 @@ pub struct MetricsSnapshot {
     // --- 서버 사이드 계측 (Responder 집계) ---
     pub server_requests: u64,
     pub server_bytes_tx: u64,
+
+    // --- Latency 히스토그램 버킷 (누적, Prometheus le 스타일) ---
+    /// 버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf]
+    pub latency_histogram: Vec<HistogramBucket>,
 }

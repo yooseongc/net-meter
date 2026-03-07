@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use net_meter_core::{MetricsSnapshot, TestProfile, TestState};
 use net_meter_metrics::{Aggregator, Collector};
 use tokio::sync::{broadcast, Mutex, RwLock};
+
+use crate::result::TestResult;
 
 /// 전역 애플리케이션 상태.
 ///
@@ -33,6 +36,12 @@ pub struct AppState {
 
     /// 시험 시작/중지 오케스트레이터 핸들
     pub orchestrator: Mutex<crate::orchestrator::Orchestrator>,
+
+    /// 시험 시작 시각 (elapsed 계산용)
+    pub test_start_time: RwLock<Option<Instant>>,
+
+    /// 완료된 시험 결과 목록 (최신 순)
+    pub test_results: RwLock<Vec<TestResult>>,
 }
 
 impl AppState {
@@ -50,6 +59,8 @@ impl AppState {
             snapshot_tx,
             aggregator: Mutex::new(aggregator),
             orchestrator: Mutex::new(crate::orchestrator::Orchestrator::new()),
+            test_start_time: RwLock::new(None),
+            test_results: RwLock::new(Vec::new()),
         })
     }
 }

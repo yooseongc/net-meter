@@ -200,59 +200,59 @@ repo/
 1. CPS 시험
 
 * 목표:
- * 초당 신규 연결 생성 능력 측정
- * 연결 성공률, 실패율, 타임아웃률 측정
+  * 초당 신규 연결 생성 능력 측정
+  * 연결 성공률, 실패율, 타임아웃률 측정
 * 측정 지표:
- * attempted connections/sec
- * established connections/sec
- * HTTP handshake success rate
- * error code distribution
- * connection latency histogram
+  * attempted connections/sec
+  * established connections/sec
+  * HTTP handshake success rate
+  * error code distribution
+  * connection latency histogram
 
 2. BW 시험
 
 * 목표:
  * 대역폭 최대치 및 안정 구간 측정
 * 측정 지표:
- * tx/rx bytes per sec
- * application goodput
- * response throughput
- * retransmission indicators
- * CPU / memory usage correlation
+  * tx/rx bytes per sec
+  * application goodput
+  * response throughput
+  * retransmission indicators
+  * CPU / memory usage correlation
 
 3. CC 시험
 
 * 목표:
- * 일정 수의 동시 연결 유지 능력 측정
+  * 일정 수의 동시 연결 유지 능력 측정
 * 측정 지표:
- * active connections
- * session survival duration
- * error/timeout/reset rate
- * latency under concurrency
- * memory footprint per connection
+  * active connections
+  * session survival duration
+  * error/timeout/reset rate
+  * latency under concurrency
+  * memory footprint per connection
 
 ---
 
 ## HTTP 기능 요구사항
 
 * HTTP/1.1
- * keep-alive 지원
- * GET/POST 기본 지원
- * request body / response body 크기 설정 가능
- * 헤더 수/크기 프로파일 설정 가능
+  * keep-alive 지원
+  * GET/POST 기본 지원
+  * request body / response body 크기 설정 가능
+  * 헤더 수/크기 프로파일 설정 가능
 * HTTP/2
- * multiplexing 지원
- * 동시 stream 수 설정 가능
- * TLS는 초기에는 선택사항이나, cleartext h2c와 TLS h2 여부를 아키텍처 차원에서 분리해서 고려
- * flow control, max concurrent streams, header table 영향 확인 가능하도록 확장 여지 확보
+  * multiplexing 지원
+  * 동시 stream 수 설정 가능
+  * TLS는 초기에는 선택사항이나, cleartext h2c와 TLS h2 여부를 아키텍처 차원에서 분리해서 고려
+  * flow control, max concurrent streams, header table 영향 확인 가능하도록 확장 여지 확보
 * 공통 측정 항목
- * request count
- * response count
- * success/failure
- * status code distribution
- * request latency
- * time to first byte
- * full response completion latency
- * bytes in/out
- * socket-level errors
- * TLS 사용 시 handshake 지표
+  * request count
+  * response count
+  * success/failure
+  * status code distribution
+  * request latency
+  * time to first byte
+  * full response completion latency
+  * bytes in/out
+  * socket-level errors
+  * TLS 사용 시 handshake 지표
