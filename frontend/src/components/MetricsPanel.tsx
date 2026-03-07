@@ -241,8 +241,8 @@ export default function MetricsPanel() {
     latP99: +s.latency_p99_ms.toFixed(2),
   }))
 
-  const targetCps = profile?.test_type === 'cps' ? profile.target_cps : undefined
-  const targetCc = profile?.target_cc
+  const targetCps = profile?.test_type === 'cps' ? profile.default_load.target_cps : undefined
+  const targetCc = profile?.default_load.target_cc
   const succ = successRate(snap)
 
   return (

@@ -1,4 +1,4 @@
-use net_meter_core::{MetricsSnapshot, TestProfile};
+use net_meter_core::{MetricsSnapshot, TestConfig};
 use serde::{Deserialize, Serialize};
 
 /// 시험 완료 후 저장되는 결과 레코드
@@ -7,8 +7,8 @@ pub struct TestResult {
     /// 고유 ID (UUID v4)
     pub id: String,
 
-    /// 시험 프로파일 (전체 설정 보존)
-    pub profile: TestProfile,
+    /// 시험 설정 (전체 TestConfig 보존)
+    pub config: TestConfig,
 
     /// 시험 시작 Unix timestamp (초)
     pub started_at_secs: u64,

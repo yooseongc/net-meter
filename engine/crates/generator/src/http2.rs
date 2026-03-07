@@ -1,15 +1,16 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use net_meter_core::{HttpPayload, LoadConfig, TestType};
+use bytes::Bytes;
+use http::{Method, Request};
+use net_meter_core::{HttpMethod, HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::Collector;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use tracing::debug;
 
-/// HTTP/1.1 트래픽 발생 진입점
+/// HTTP/2 h2c 트래픽 발생 진입점
 pub async fn run(
     test_type: TestType,
     addr: &str,
@@ -28,7 +29,7 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
-// CPS: interval + 세마포어 backpressure
+// CPS: 초당 신규 h2c 연결
 // ---------------------------------------------------------------------------
 
 async fn run_cps(
@@ -50,7 +51,8 @@ async fn run_cps(
     let mut ticker = interval(tick_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let method = payload.method.as_str().to_string();
+    let host = addr.to_string();
+    let method = to_http_method(payload.method);
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
@@ -64,17 +66,18 @@ async fn run_cps(
 
                 let permit = match Arc::clone(&sem).try_acquire_owned() {
                     Ok(p) => p,
-                    Err(_) => { debug!("backpressure: semaphore full"); continue; }
+                    Err(_) => { debug!("h2 backpressure: semaphore full"); continue; }
                 };
 
                 let g = Arc::clone(&global);
                 let p = Arc::clone(&proto);
                 let a = addr.clone();
+                let h = host.clone();
                 let me = method.clone();
                 let pa = path.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to).await;
+                    single_request_h2c(&a, &h, me, &pa, req_body, g, p, connect_to, response_to).await;
                 });
             }
         }
@@ -82,7 +85,7 @@ async fn run_cps(
 }
 
 // ---------------------------------------------------------------------------
-// CC: target_cc개 워커, keep-alive 루프
+// CC: 동시 h2c 연결 유지
 // ---------------------------------------------------------------------------
 
 async fn run_cc(
@@ -97,7 +100,8 @@ async fn run_cc(
     let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
-    let method = payload.method.as_str().to_string();
+    let host = addr.to_string();
+    let method = to_http_method(payload.method);
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
@@ -107,10 +111,11 @@ async fn run_cc(
         let g = Arc::clone(&global);
         let p = Arc::clone(&proto);
         let a = addr.clone();
+        let h = host.clone();
         let me = method.clone();
         let pa = path.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_loop(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, 1).await;
         }));
     }
 
@@ -122,7 +127,7 @@ async fn run_cc(
 }
 
 // ---------------------------------------------------------------------------
-// BW: 대역폭 포화 (CC와 동일 구조)
+// BW: 다중 연결 × 다중 스트림
 // ---------------------------------------------------------------------------
 
 async fn run_bw(
@@ -135,9 +140,11 @@ async fn run_bw(
     deadline: Option<Instant>,
 ) {
     let concurrency = load.effective_cc() as usize;
+    let streams_per_conn = payload.h2_max_concurrent_streams.unwrap_or(10) as usize;
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
-    let method = payload.method.as_str().to_string();
+    let host = addr.to_string();
+    let method = to_http_method(payload.method);
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
@@ -147,10 +154,11 @@ async fn run_bw(
         let g = Arc::clone(&global);
         let p = Arc::clone(&proto);
         let a = addr.clone();
+        let h = host.clone();
         let me = method.clone();
         let pa = path.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_loop(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, streams_per_conn).await;
         }));
     }
 
@@ -162,12 +170,13 @@ async fn run_bw(
 }
 
 // ---------------------------------------------------------------------------
-// 단일 요청 (Connection: close)
+// 단일 h2c 요청 (CPS)
 // ---------------------------------------------------------------------------
 
-async fn single_request(
+async fn single_request_h2c(
     addr: &str,
-    method: &str,
+    host: &str,
+    method: Method,
     path: &str,
     req_body_bytes: usize,
     global: Arc<Collector>,
@@ -179,21 +188,21 @@ async fn single_request(
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => {
+    let send_req = match timeout(connect_timeout, connect_h2c(addr)).await {
+        Ok(Ok(sr)) => {
             let us = connect_start.elapsed().as_micros() as u64;
             record_established(&global, &proto);
             global.record_connect_latency(us);
             proto.record_connect_latency(us);
-            s
+            sr
         }
         Ok(Err(e)) => {
-            debug!(addr, error = %e, "HTTP/1.1 connect failed");
+            debug!(addr, error = %e, "h2c handshake failed");
             record_failed(&global, &proto);
             return;
         }
         Err(_) => {
-            debug!(addr, "HTTP/1.1 connect timed out");
+            debug!(addr, "h2c connect timed out");
             record_failed(&global, &proto);
             record_timeout(&global, &proto);
             return;
@@ -202,93 +211,31 @@ async fn single_request(
 
     let result = timeout(
         response_timeout,
-        send_and_receive(stream, addr, method, path, req_body_bytes, &global, &proto),
+        send_h2_stream(&send_req, host, method, path, req_body_bytes, &global, &proto),
     )
     .await;
 
     match result {
         Ok(Ok((status, bytes_rx))) => {
-            let total_us = total_start.elapsed().as_micros() as u64;
-            record_response(&global, &proto, status, bytes_rx, total_us);
+            record_response(&global, &proto, status, bytes_rx, total_start.elapsed().as_micros() as u64);
         }
-        Ok(Err(e)) => debug!(addr, error = %e, "HTTP/1.1 IO error"),
+        Ok(Err(e)) => debug!(addr, error = %e, "h2 stream error"),
         Err(_) => {
-            debug!(addr, "HTTP/1.1 response timed out");
+            debug!(addr, "h2 stream timed out");
             record_timeout(&global, &proto);
         }
     }
     record_closed(&global, &proto);
 }
 
-async fn send_and_receive(
-    mut stream: TcpStream,
-    host: &str,
-    method: &str,
-    path: &str,
-    req_body_bytes: usize,
-    global: &Arc<Collector>,
-    proto: &Arc<Collector>,
-) -> std::io::Result<(u16, u64)> {
-    let header = if req_body_bytes > 0 {
-        format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: net-meter/0.1\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
-            method, path, host, req_body_bytes
-        )
-    } else {
-        format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: net-meter/0.1\r\n\r\n",
-            method, path, host
-        )
-    };
-    stream.write_all(header.as_bytes()).await?;
-
-    if req_body_bytes > 0 {
-        let body = vec![0u8; req_body_bytes];
-        stream.write_all(&body).await?;
-    }
-
-    let tx = (header.len() + req_body_bytes) as u64;
-    global.record_request(tx);
-    proto.record_request(tx);
-
-    let ttfb_start = Instant::now();
-    let mut buf = vec![0u8; 8192];
-    let mut total_rx: u64 = 0;
-    let mut status_code: u16 = 0;
-    let mut first_byte = true;
-
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 { break; }
-
-        if first_byte {
-            let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
-            global.record_ttfb(ttfb_us);
-            proto.record_ttfb(ttfb_us);
-            if let Ok(s) = std::str::from_utf8(&buf[..n.min(32)]) {
-                if s.starts_with("HTTP/") {
-                    status_code = s
-                        .split_whitespace()
-                        .nth(1)
-                        .and_then(|c| c.parse().ok())
-                        .unwrap_or(0);
-                }
-            }
-            first_byte = false;
-        }
-        total_rx += n as u64;
-    }
-
-    Ok((status_code, total_rx))
-}
-
 // ---------------------------------------------------------------------------
-// CC/BW 워커
+// h2c 연결 워커 (CC/BW)
 // ---------------------------------------------------------------------------
 
-async fn keep_alive_loop(
+async fn connection_worker(
     addr: &str,
-    method: &str,
+    host: &str,
+    method: Method,
     path: &str,
     req_body_bytes: usize,
     global: Arc<Collector>,
@@ -296,12 +243,66 @@ async fn keep_alive_loop(
     connect_timeout: Duration,
     response_timeout: Duration,
     deadline: Option<Instant>,
+    concurrent_streams: usize,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
-        single_request(addr, method, path, req_body_bytes,
-            Arc::clone(&global), Arc::clone(&proto),
-            connect_timeout, response_timeout).await;
+
+        record_attempt(&global, &proto);
+        let connect_start = Instant::now();
+        let send_req = match timeout(connect_timeout, connect_h2c(addr)).await {
+            Ok(Ok(sr)) => {
+                let us = connect_start.elapsed().as_micros() as u64;
+                record_established(&global, &proto);
+                global.record_connect_latency(us);
+                proto.record_connect_latency(us);
+                sr
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "h2c connect failed, retrying");
+                record_failed(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(_) => {
+                debug!("h2c connect timed out, retrying");
+                record_failed(&global, &proto);
+                record_timeout(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let mut stream_handles = Vec::with_capacity(concurrent_streams);
+        for _ in 0..concurrent_streams {
+            let sr = send_req.clone();
+            let g = Arc::clone(&global);
+            let p = Arc::clone(&proto);
+            let h = host.to_string();
+            let me = method.clone();
+            let pa = path.to_string();
+
+            stream_handles.push(tokio::spawn(async move {
+                loop {
+                    if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+                    let total_start = Instant::now();
+                    let result = timeout(
+                        response_timeout,
+                        send_h2_stream(&sr, &h, me.clone(), &pa, req_body_bytes, &g, &p),
+                    ).await;
+                    match result {
+                        Ok(Ok((status, bytes_rx))) => {
+                            record_response(&g, &p, status, bytes_rx, total_start.elapsed().as_micros() as u64);
+                        }
+                        Ok(Err(_)) => break,
+                        Err(_) => record_timeout(&g, &p),
+                    }
+                }
+            }));
+        }
+
+        for h in stream_handles { let _ = h.await; }
+        record_closed(&global, &proto);
     }
 }
 
@@ -309,10 +310,82 @@ async fn keep_alive_loop(
 // 헬퍼
 // ---------------------------------------------------------------------------
 
+async fn connect_h2c(addr: &str) -> anyhow::Result<h2::client::SendRequest<Bytes>> {
+    let stream = TcpStream::connect(addr).await?;
+    let (send_req, connection) = h2::client::Builder::new()
+        .initial_window_size(1 << 20)
+        .handshake::<_, Bytes>(stream)
+        .await?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            debug!("h2 connection closed: {}", e);
+        }
+    });
+    Ok(send_req)
+}
+
+async fn send_h2_stream(
+    send_req: &h2::client::SendRequest<Bytes>,
+    host: &str,
+    method: Method,
+    path: &str,
+    req_body_bytes: usize,
+    global: &Arc<Collector>,
+    proto: &Arc<Collector>,
+) -> anyhow::Result<(u16, u64)> {
+    let end_stream = req_body_bytes == 0;
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", host)
+        .header("user-agent", "net-meter/0.1")
+        .body(())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let mut sr = send_req.clone().ready().await.map_err(|e| anyhow::anyhow!(e))?;
+    let (response_future, mut send_stream) = sr
+        .send_request(request, end_stream)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let mut tx_bytes: u64 = 64;
+    if req_body_bytes > 0 {
+        let body = Bytes::from(vec![0u8; req_body_bytes]);
+        tx_bytes += body.len() as u64;
+        send_stream.send_data(body, true).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    global.record_request(tx_bytes);
+    proto.record_request(tx_bytes);
+
+    let ttfb_start = Instant::now();
+    let response = response_future.await.map_err(|e| anyhow::anyhow!(e))?;
+    let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
+    global.record_ttfb(ttfb_us);
+    proto.record_ttfb(ttfb_us);
+
+    let status = response.status().as_u16();
+    let mut recv_body = response.into_body();
+    let mut bytes_rx = 0u64;
+
+    while let Some(chunk) = recv_body.data().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
+        bytes_rx += chunk.len() as u64;
+        let _ = recv_body.flow_control().release_capacity(chunk.len());
+    }
+
+    Ok((status, bytes_rx))
+}
+
 fn build_path(base: &str, extra_bytes: Option<usize>) -> String {
     match extra_bytes {
         None | Some(0) => base.to_string(),
         Some(n) => format!("{}?x={}", base, "a".repeat(n)),
+    }
+}
+
+fn to_http_method(method: HttpMethod) -> Method {
+    match method {
+        HttpMethod::Get => Method::GET,
+        HttpMethod::Post => Method::POST,
     }
 }
 

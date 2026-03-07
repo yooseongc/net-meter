@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use net_meter_core::TestProfile;
+use net_meter_core::TestConfig;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -16,30 +16,29 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/profiles/:id", delete(delete_profile))
 }
 
-async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<TestProfile>> {
-    let profiles = state.saved_profiles.read().await;
-    Json(profiles.values().cloned().collect())
+async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<TestConfig>> {
+    let configs = state.saved_configs.read().await;
+    Json(configs.values().cloned().collect())
 }
 
 async fn create_profile(
     State(state): State<Arc<AppState>>,
-    Json(mut profile): Json<TestProfile>,
-) -> Json<TestProfile> {
-    // ID가 없으면 새로 발급
-    if profile.id.is_empty() {
-        profile.id = Uuid::new_v4().to_string();
+    Json(mut config): Json<TestConfig>,
+) -> Json<TestConfig> {
+    if config.id.is_empty() {
+        config.id = Uuid::new_v4().to_string();
     }
-    let mut profiles = state.saved_profiles.write().await;
-    profiles.insert(profile.id.clone(), profile.clone());
-    Json(profile)
+    let mut configs = state.saved_configs.write().await;
+    configs.insert(config.id.clone(), config.clone());
+    Json(config)
 }
 
 async fn delete_profile(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    let mut profiles = state.saved_profiles.write().await;
-    if profiles.remove(&id).is_some() {
+    let mut configs = state.saved_configs.write().await;
+    if configs.remove(&id).is_some() {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

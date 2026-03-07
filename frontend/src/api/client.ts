@@ -1,7 +1,7 @@
 // API 타입 정의 및 fetch 유틸리티
 
 export type TestType = 'cps' | 'bw' | 'cc'
-export type Protocol = 'http1' | 'http2'
+export type Protocol = 'tcp' | 'http1' | 'http2'
 export type HttpMethod = 'GET' | 'POST'
 export type TestState =
   | 'idle'
@@ -11,34 +11,104 @@ export type TestState =
   | 'completed'
   | 'failed'
 
-export interface TestProfile {
+// ---------------------------------------------------------------------------
+// Payload
+// ---------------------------------------------------------------------------
+
+export interface TcpPayload {
+  type: 'tcp'
+  tx_bytes: number
+  rx_bytes: number
+}
+
+export interface HttpPayload {
+  type: 'http'
+  method: HttpMethod
+  path: string
+  request_body_bytes?: number
+  response_body_bytes?: number
+  path_extra_bytes?: number
+  h2_max_concurrent_streams?: number
+}
+
+export type PayloadProfile = TcpPayload | HttpPayload
+
+// ---------------------------------------------------------------------------
+// Load, Endpoint, Pair
+// ---------------------------------------------------------------------------
+
+export interface LoadConfig {
+  target_cps?: number
+  target_cc?: number
+  max_inflight?: number
+  connect_timeout_ms?: number
+  response_timeout_ms?: number
+}
+
+export interface ClientEndpoint {
+  id: string
+  ip?: string
+}
+
+export interface ServerEndpoint {
+  id: string
+  ip?: string
+  port: number
+}
+
+export interface PairConfig {
+  id: string
+  client: ClientEndpoint
+  server: ServerEndpoint
+  protocol: Protocol
+  payload: PayloadProfile
+  load?: LoadConfig
+}
+
+export interface NsConfig {
+  use_namespace: boolean
+  netns_prefix: string
+  tcp_quickack: boolean
+}
+
+// ---------------------------------------------------------------------------
+// TestConfig (replaces TestProfile)
+// ---------------------------------------------------------------------------
+
+export interface TestConfig {
   id: string
   name: string
   test_type: TestType
-  protocol: Protocol
-  target_host: string
-  target_port: number
   duration_secs: number
-  target_cps?: number
-  target_cc?: number
-  request_body_bytes?: number
-  response_body_bytes?: number
-  method: HttpMethod
-  path: string
-  connect_timeout_ms?: number
-  response_timeout_ms?: number
-  max_inflight?: number
-  use_namespace?: boolean
-  netns_prefix?: string
-  tcp_quickack?: boolean
-  path_extra_bytes?: number
-  num_clients?: number
-  num_servers?: number
+  default_load: LoadConfig
+  pairs: PairConfig[]
+  ns_config: NsConfig
 }
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
 
 export interface HistogramBucket {
   le_ms: number   // +Inf = Infinity
   count: number
+}
+
+export interface PerProtocolSnapshot {
+  connections_attempted: number
+  connections_established: number
+  connections_failed: number
+  connections_timed_out: number
+  active_connections: number
+  bytes_tx_total: number
+  bytes_rx_total: number
+  requests_total: number
+  responses_total: number
+  status_2xx: number
+  status_4xx: number
+  status_5xx: number
+  latency_mean_ms: number
+  latency_p99_ms: number
 }
 
 export interface MetricsSnapshot {
@@ -72,22 +142,31 @@ export interface MetricsSnapshot {
   server_requests: number
   server_bytes_tx: number
   latency_histogram: HistogramBucket[]
+  by_protocol: Record<string, PerProtocolSnapshot>
 }
+
+// ---------------------------------------------------------------------------
+// Status & Results
+// ---------------------------------------------------------------------------
 
 export interface TestStatus {
   state: TestState
-  profile: TestProfile | null
+  config: TestConfig | null
   elapsed_secs: number | null
 }
 
 export interface TestResult {
   id: string
-  profile: TestProfile
+  config: TestConfig
   started_at_secs: number
   ended_at_secs: number
   elapsed_secs: number
   final_snapshot: MetricsSnapshot
 }
+
+// ---------------------------------------------------------------------------
+// Fetch utilities
+// ---------------------------------------------------------------------------
 
 const BASE = '/api'
 
@@ -106,19 +185,19 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => fetchJson<{ status: string; version: string }>('/health'),
   status: () => fetchJson<TestStatus>('/status'),
-  startTest: (profile: TestProfile) =>
+  startTest: (config: TestConfig) =>
     fetchJson<{ status: string }>('/test/start', {
       method: 'POST',
-      body: JSON.stringify(profile),
+      body: JSON.stringify(config),
     }),
   stopTest: () =>
     fetchJson<{ status: string }>('/test/stop', { method: 'POST' }),
   getMetrics: () => fetchJson<MetricsSnapshot>('/metrics'),
-  listProfiles: () => fetchJson<TestProfile[]>('/profiles'),
-  createProfile: (profile: TestProfile) =>
-    fetchJson<TestProfile>('/profiles', {
+  listProfiles: () => fetchJson<TestConfig[]>('/profiles'),
+  createProfile: (config: TestConfig) =>
+    fetchJson<TestConfig>('/profiles', {
       method: 'POST',
-      body: JSON.stringify(profile),
+      body: JSON.stringify(config),
     }),
   deleteProfile: (id: string) =>
     fetch(`${BASE}/profiles/${id}`, { method: 'DELETE' }),

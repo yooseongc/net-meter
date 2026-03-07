@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Latency 누적 히스토그램 버킷 (Prometheus le 스타일)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -9,20 +10,40 @@ pub struct HistogramBucket {
     pub count: u64,
 }
 
+/// 프로토콜별 누적 카운터 (rate 제외, 합산 집계용)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PerProtocolSnapshot {
+    pub connections_attempted: u64,
+    pub connections_established: u64,
+    pub connections_failed: u64,
+    pub connections_timed_out: u64,
+    pub active_connections: u64,
+    pub bytes_tx_total: u64,
+    pub bytes_rx_total: u64,
+    // HTTP 전용 (TCP에서는 0)
+    pub requests_total: u64,
+    pub responses_total: u64,
+    pub status_2xx: u64,
+    pub status_4xx: u64,
+    pub status_5xx: u64,
+    pub latency_mean_ms: f64,
+    pub latency_p99_ms: f64,
+}
+
 /// 특정 시점의 계측 지표 스냅샷 (직렬화 가능, 프론트엔드 전송용)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     /// Unix timestamp (초)
     pub timestamp_secs: u64,
 
-    // --- 연결 지표 ---
+    // --- 연결 지표 (전체 합산) ---
     pub connections_attempted: u64,
     pub connections_established: u64,
     pub connections_failed: u64,
     pub connections_timed_out: u64,
     pub active_connections: u64,
 
-    // --- 요청/응답 지표 ---
+    // --- 요청/응답 지표 (HTTP pair 합산) ---
     pub requests_total: u64,
     pub responses_total: u64,
     pub status_2xx: u64,
@@ -51,7 +72,7 @@ pub struct MetricsSnapshot {
     pub connect_mean_ms: f64,
     pub connect_p99_ms: f64,
 
-    // --- TTFB (ms): 요청 전송 후 첫 바이트 수신까지 ---
+    // --- TTFB (ms): 요청 전송 후 첫 바이트 수신까지 (HTTP 전용) ---
     pub ttfb_mean_ms: f64,
     pub ttfb_p99_ms: f64,
 
@@ -62,4 +83,9 @@ pub struct MetricsSnapshot {
     // --- Latency 히스토그램 버킷 (누적, Prometheus le 스타일) ---
     /// 버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf]
     pub latency_histogram: Vec<HistogramBucket>,
+
+    // --- 프로토콜별 분리 집계 ---
+    /// 키: "tcp", "http1", "http2"
+    #[serde(default)]
+    pub by_protocol: HashMap<String, PerProtocolSnapshot>,
 }

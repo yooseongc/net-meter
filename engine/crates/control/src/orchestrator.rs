@@ -1,8 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use net_meter_core::{TestProfile, TestState};
+use net_meter_core::{PayloadProfile, Protocol, TestConfig, TestState};
 use net_meter_generator::Generator;
 use net_meter_metrics::Collector;
 use net_meter_ns::NamespaceManager;
@@ -10,13 +11,12 @@ use net_meter_responder::Responder;
 use tracing::{error, info};
 
 use crate::result::TestResult;
-
 use crate::state::AppState;
 
 /// 시험 생명주기를 관리한다.
 ///
-/// start() -> Preparing -> Running
-/// stop()  -> Stopping  -> Completed
+/// start() → Preparing → Running
+/// stop()  → Stopping  → Completed
 pub struct Orchestrator {
     generator: Generator,
     responder: Responder,
@@ -33,21 +33,47 @@ impl Orchestrator {
     }
 
     /// 시험을 시작한다.
-    pub async fn start(
-        &mut self,
-        profile: TestProfile,
-        metrics: Arc<Collector>,
-        state: Arc<AppState>,
-    ) {
+    ///
+    /// 1. 프로토콜별 Collector 생성 및 MultiAggregator 등록
+    /// 2. NS 모드 또는 로컬 모드로 분기
+    pub async fn start(&mut self, config: TestConfig, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Preparing;
-        *state.active_profile.write().await = Some(profile.clone());
+        *state.active_config.write().await = Some(config.clone());
         *state.test_start_time.write().await = Some(Instant::now());
-        metrics.reset();
 
-        info!(profile_name = %profile.name, use_namespace = profile.use_namespace, "Starting test");
+        // 글로벌 + 프로토콜별 Collector 초기화
+        state.global_metrics.reset();
+        let mut proto_collectors: HashMap<Protocol, Arc<Collector>> = HashMap::new();
+        for &proto in &config.active_protocols() {
+            let c = Collector::new();
+            c.reset();
+            proto_collectors.insert(proto, c);
+        }
 
-        if profile.use_namespace {
-            match self.start_ns_mode(profile, metrics, Arc::clone(&state)).await {
+        // MultiAggregator에 등록
+        {
+            let mut agg = state.aggregator.lock().await;
+            agg.set_protocol_collectors(
+                proto_collectors
+                    .iter()
+                    .map(|(p, c)| (p.as_str().to_string(), Arc::clone(c)))
+                    .collect(),
+            );
+        }
+        *state.protocol_metrics.write().await = proto_collectors.clone();
+
+        info!(
+            config_name = %config.name,
+            pairs = config.pairs.len(),
+            use_namespace = config.ns_config.use_namespace,
+            "Starting test"
+        );
+
+        if config.ns_config.use_namespace {
+            match self
+                .start_ns_mode(config, proto_collectors, Arc::clone(&state))
+                .await
+            {
                 Ok(()) => {}
                 Err(e) => {
                     error!(error = %e, "Failed to start test in namespace mode");
@@ -55,99 +81,153 @@ impl Orchestrator {
                 }
             }
         } else {
-            self.start_local_mode(profile, metrics, state).await;
+            match self
+                .start_local_mode(config, proto_collectors, Arc::clone(&state))
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    error!(error = %e, "Failed to start test in local mode");
+                    *state.test_state.write().await = TestState::Failed;
+                }
+            }
         }
     }
 
-    /// 로컬 모드: namespace 없이 localhost에서 실행.
+    /// 로컬 모드: namespace 없이 localhost(또는 server.ip)에서 실행.
     async fn start_local_mode(
         &mut self,
-        profile: TestProfile,
-        metrics: Arc<Collector>,
+        config: TestConfig,
+        proto_collectors: HashMap<Protocol, Arc<Collector>>,
         state: Arc<AppState>,
-    ) {
-        let responder_addr: SocketAddr = format!("0.0.0.0:{}", profile.target_port)
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:8080".parse().unwrap());
+    ) -> anyhow::Result<()> {
+        let tcp_quickack = config.ns_config.tcp_quickack;
+        let global = Arc::clone(&state.global_metrics);
 
-        if let Err(e) = self
-            .responder
-            .start(responder_addr, Arc::clone(&metrics), profile.response_body_bytes, profile.tcp_quickack)
-            .await
-        {
-            error!(error = %e, "Failed to start responder");
-            *state.test_state.write().await = TestState::Failed;
-            return;
+        // pair_addrs: pair_id → "host:port"
+        let pair_addrs = config.local_server_addrs();
+
+        // 고유 server_id별로 Responder 하나씩 시작 (같은 서버를 공유하는 pair는 중복 시작 방지)
+        let mut started: HashSet<String> = HashSet::new();
+        for pair in &config.pairs {
+            if !started.insert(pair.server.id.clone()) {
+                continue;
+            }
+            let bind_ip = pair.server.ip.as_deref().unwrap_or("0.0.0.0");
+            let bind_addr: SocketAddr = format!("{}:{}", bind_ip, pair.server.port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid server addr: {}", e))?;
+
+            let proto_col = proto_collectors
+                .get(&pair.protocol)
+                .cloned()
+                .unwrap_or_else(Collector::new);
+
+            self.responder
+                .start_server(
+                    bind_addr,
+                    pair.protocol,
+                    &pair.payload,
+                    Arc::clone(&global),
+                    proto_col,
+                    tcp_quickack,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Responder start failed: {}", e))?;
         }
 
         // Responder 소켓 준비 대기
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         self.generator
-            .start(profile.clone(), Arc::clone(&metrics), None)
+            .start(&config, global, &proto_collectors, &pair_addrs, None)
             .await;
 
-        self.transition_to_running(profile, state).await;
+        self.transition_to_running(config, state).await;
+        Ok(())
     }
 
-    /// Namespace 모드: client/server NS를 생성하고 격리된 환경에서 실행.
+    /// NS 모드: client/server NS를 생성하고 격리된 환경에서 실행.
     async fn start_ns_mode(
         &mut self,
-        profile: TestProfile,
-        metrics: Arc<Collector>,
+        config: TestConfig,
+        proto_collectors: HashMap<Protocol, Arc<Collector>>,
         state: Arc<AppState>,
     ) -> anyhow::Result<()> {
-        // 권한 확인
-        net_meter_ns::check_capability()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        net_meter_ns::check_capability().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let mut ns = NamespaceManager::new(&profile.netns_prefix);
+        let mut ns = NamespaceManager::new(&config.ns_config.netns_prefix);
         ns.setup().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let server_ns_name = ns.server_ns.clone();
-        let client_ns_name = ns.client_ns.clone();
-        let server_ip = ns.server_ip.clone();
-
-        // Responder: server NS 내에서 바인드
-        if let Err(e) = self
-            .responder
-            .start_in_ns(
-                &server_ns_name,
-                profile.target_port,
-                Arc::clone(&metrics),
-                profile.response_body_bytes,
-                profile.tcp_quickack,
-            )
+        // 서버 IP 할당 + server NS에 alias 추가
+        let (pair_addrs, server_binds) = ns
+            .assign_pair_addrs(&config.pairs)
             .await
-        {
-            ns.teardown().await;
-            return Err(anyhow::anyhow!("Responder start_in_ns failed: {}", e));
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let client_ns_name = ns.client_ns.clone();
+        let server_ns_name = ns.server_ns.clone();
+        let tcp_quickack = config.ns_config.tcp_quickack;
+        let global = Arc::clone(&state.global_metrics);
+
+        // server_id → (protocol, payload): 각 고유 서버가 어떤 프로토콜/페이로드를 사용하는지
+        let mut server_proto_map: HashMap<String, (Protocol, PayloadProfile)> = HashMap::new();
+        for pair in &config.pairs {
+            server_proto_map
+                .entry(pair.server.id.clone())
+                .or_insert_with(|| (pair.protocol, pair.payload.clone()));
+        }
+
+        // 고유 서버별로 NS 내 Responder 시작
+        for (server_id, bind_addr_str) in &server_binds {
+            let bind_addr: SocketAddr = bind_addr_str
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind addr {}: {}", bind_addr_str, e))?;
+
+            let (protocol, ref payload) = match server_proto_map.get(server_id) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let proto_col = proto_collectors
+                .get(&protocol)
+                .cloned()
+                .unwrap_or_else(Collector::new);
+
+            self.responder
+                .start_server_in_ns(
+                    &server_ns_name,
+                    bind_addr,
+                    protocol,
+                    payload,
+                    Arc::clone(&global),
+                    proto_col,
+                    tcp_quickack,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Responder NS start failed for {}: {}", server_id, e))?;
         }
 
         // Responder 소켓 준비 대기
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Generator: client NS에서 server NS IP로 연결
-        let mut ns_profile = profile.clone();
-        ns_profile.target_host = server_ip;
-
         self.generator
-            .start(ns_profile.clone(), Arc::clone(&metrics), Some(client_ns_name))
+            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name))
             .await;
 
         self.ns_manager = Some(ns);
-        self.transition_to_running(ns_profile, state).await;
+        self.transition_to_running(config, state).await;
         Ok(())
     }
 
     /// Running 상태로 전환하고 duration 기반 자동 종료를 등록한다.
-    async fn transition_to_running(&self, profile: TestProfile, state: Arc<AppState>) {
+    async fn transition_to_running(&self, config: TestConfig, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Running;
         info!("Test is running");
 
-        if profile.duration_secs > 0 {
+        if config.duration_secs > 0 {
             let state_clone = Arc::clone(&state);
-            let duration = profile.duration_secs;
+            let duration = config.duration_secs;
             tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(duration)).await;
                 let current = *state_clone.test_state.read().await;
@@ -171,11 +251,18 @@ impl Orchestrator {
         info!("Stopping test");
 
         self.generator.stop().await;
-        self.responder.stop();
+        self.responder.stop_all();
 
         if let Some(mut ns) = self.ns_manager.take() {
             ns.teardown().await;
         }
+
+        // MultiAggregator 프로토콜 컬렉터 정리
+        {
+            let mut agg = state.aggregator.lock().await;
+            agg.clear_protocol_collectors();
+        }
+        *state.protocol_metrics.write().await = HashMap::new();
 
         // 시험 결과 저장
         let now_secs = SystemTime::now()
@@ -187,13 +274,13 @@ impl Orchestrator {
         let elapsed_secs = start_instant.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let started_at_secs = now_secs.saturating_sub(elapsed_secs);
 
-        let profile = state.active_profile.read().await.clone();
+        let config = state.active_config.read().await.clone();
         let final_snapshot = state.latest_snapshot.read().await.clone();
 
-        if let Some(profile) = profile {
+        if let Some(config) = config {
             let result = TestResult {
                 id: uuid::Uuid::new_v4().to_string(),
-                profile,
+                config,
                 started_at_secs,
                 ended_at_secs: now_secs,
                 elapsed_secs,
@@ -202,7 +289,7 @@ impl Orchestrator {
             let mut results = state.test_results.write().await;
             results.insert(0, result); // 최신 순
             if results.len() > 50 {
-                results.truncate(50); // 최대 50개 보존
+                results.truncate(50);
             }
         }
 

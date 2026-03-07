@@ -22,7 +22,7 @@ function downloadJson(result: TestResult) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `result_${result.profile.name.replace(/\s+/g, '_')}_${result.started_at_secs}.json`
+  a.download = `result_${result.config.name.replace(/\s+/g, '_')}_${result.started_at_secs}.json`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -36,11 +36,12 @@ function downloadCsv(results: TestResult[]) {
   ]
   const rows = results.map((r) => {
     const s = r.final_snapshot
+    const protocols = [...new Set(r.config.pairs.map((p) => p.protocol))].join('/')
     return [
       r.id,
-      r.profile.name,
-      r.profile.test_type,
-      r.profile.protocol,
+      r.config.name,
+      r.config.test_type,
+      protocols,
       formatDate(r.started_at_secs),
       r.elapsed_secs,
       s.cps.toFixed(2),
@@ -106,8 +107,8 @@ function ResultDetail({ result }: { result: TestResult }) {
       </div>
 
       <div style={{ fontSize: 12, color: '#484f58' }}>
-        Profile: {result.profile.test_type.toUpperCase()} / {result.profile.protocol.toUpperCase()} /
-        target: {result.profile.target_host}:{result.profile.target_port}
+        Config: {result.config.test_type.toUpperCase()} · {result.config.pairs.length} pair(s) ·{' '}
+        {[...new Set(result.config.pairs.map((p) => p.protocol.toUpperCase()))].join('/')}
       </div>
     </div>
   )
@@ -183,19 +184,19 @@ export default function Results() {
                       borderRadius: 20,
                       fontSize: 11,
                       fontWeight: 700,
-                      background: r.profile.test_type === 'cps' ? '#3fb950'
-                        : r.profile.test_type === 'bw' ? '#d29922' : '#58a6ff',
+                      background: r.config.test_type === 'cps' ? '#3fb950'
+                        : r.config.test_type === 'bw' ? '#d29922' : '#58a6ff',
                       color: '#0d1117',
                       flexShrink: 0,
                     }}
                   >
-                    {r.profile.test_type.toUpperCase()}
+                    {r.config.test_type.toUpperCase()}
                   </span>
 
                   {/* 이름 + 날짜 */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {r.profile.name}
+                      {r.config.name}
                     </div>
                     <div style={{ fontSize: 11, color: '#8b949e' }}>
                       {formatDate(r.started_at_secs)} · {formatTime(r.elapsed_secs)}

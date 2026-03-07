@@ -121,6 +121,12 @@ pub struct TestProfile {
     /// 가상 서버(응답기) 수. 현재는 1만 지원, 향후 다중 NS 확장 예정.
     #[serde(default = "default_one")]
     pub num_servers: u32,
+
+    // --- HTTP/2 전용 ---
+    /// HTTP/2 연결당 최대 동시 스트림 수 (BW 모드에서 활용).
+    /// None이면 10 사용. 서버 SETTINGS_MAX_CONCURRENT_STREAMS를 따름.
+    #[serde(default)]
+    pub h2_max_concurrent_streams: Option<u32>,
 }
 
 fn default_netns_prefix() -> String {
@@ -156,6 +162,7 @@ impl Default for TestProfile {
             path_extra_bytes: None,
             num_clients: 1,
             num_servers: 1,
+            h2_max_concurrent_streams: None,
         }
     }
 }

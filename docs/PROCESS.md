@@ -9,8 +9,9 @@
 | 3 | Responder: hyper 1.0 직접 사용, 서버 사이드 메트릭 | ✅ 완료 |
 | 4 | Namespace 관리: veth pair, setns, IP forwarding | ✅ 완료 |
 | 5 | 부가 기능: SO_REUSEPORT, 정적 파일 서빙, TCP_QUICKACK 등 | ✅ 완료 |
-| 6 | Frontend UI 고도화: 차트, 프로파일 편집기 | 미시작 |
-| 7 | HTTP/2 지원: h2c / TLS h2 | 미시작 |
+| 6 | Frontend UI 고도화: 차트, 프로파일 편집기 | ✅ 완료 |
+| 7 | HTTP/2 지원: h2c / TLS h2 | ✅ 완료 (h2c) |
+| Booster | TCP 프로토콜, 다중 Pair 토폴로지, TestConfig 전면 전환 | ✅ 완료 |
 | 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | 미시작 |
 | 9 | eBPF/XDP 옵션: aya 기반 패킷 계측 | 미시작 |
 
@@ -161,15 +162,96 @@ DELETE /api/profiles/:id     → 프로파일 삭제
 
 ---
 
-## Phase 7: HTTP/2 지원 (예정)
+## Phase 7: HTTP/2 h2c 지원 ✅
 
-**목표:** h2c (cleartext) 및 TLS h2 지원
+**목표:** h2c (cleartext HTTP/2, Prior Knowledge) 지원
 
-**작업 계획:**
-- [ ] Generator: `h2` 크레이트 기반 HTTP/2 클라이언트
-- [ ] Responder: `h2` 서버 (multiplexing, stream 수 설정)
-- [ ] TestProfile: `h2_max_concurrent_streams` 옵션
-- [ ] h2c / TLS h2 경로 아키텍처 수준에서 분리
+**달성 사항:**
+- [x] `engine/Cargo.toml`: `h2 = "0.4"`, `http = "1"` 추가, `hyper` features에 `http2` 추가
+- [x] `core::TestProfile`: `h2_max_concurrent_streams: Option<u32>` 필드 추가
+- [x] **Generator `http2.rs`** (신규 크레이트 모듈):
+  - h2c Prior Knowledge 연결: `h2::client::Builder::new().handshake()`
+  - CPS 모드: 초당 신규 h2c 연결 + 1 스트림 + 세마포어 backpressure
+  - CC 모드: `target_cc`개 동시 h2c 연결, 각 연결에서 순차 스트림 반복
+  - BW 모드: `target_cc` 연결 × `h2_max_concurrent_streams` 동시 스트림 (multiplexing)
+  - `SendRequest::clone()` + `ready().await` 패턴으로 안전한 스트림 다중화
+  - TCP connect latency, TTFB, 전체 latency 독립 계측
+  - h2 flow control: `release_capacity()` 자동 처리
+- [x] **Generator `lib.rs`**: `protocol == Http2` 시 `http2::run()` 라우팅 (local & NS 모드 모두)
+- [x] **Responder `lib.rs`** (HTTP/2 서버):
+  - `start()` / `start_in_ns()`에 `protocol: Protocol` 파라미터 추가
+  - `hyper::server::conn::http2::Builder::new(TokioExecutor::new())` 기반 h2c 서버
+  - 기존 HTTP/1.1 (`http1::Builder`) 및 HTTP/2 (`http2::Builder`) 프로토콜 분기
+  - 동일한 `handle_request` 서비스 함수 재사용 (hyper body 타입 호환)
+- [x] **Orchestrator**: `profile.protocol` → responder에 전달
+- [x] **Frontend**:
+  - `TestProfile` 타입에 `h2_max_concurrent_streams?: number` 추가
+  - HTTP 섹션: `protocol === 'http2'` 시 "Max Concurrent Streams" 필드 표시
+
+**아키텍처 결정:**
+- h2c (cleartext HTTP/2 Prior Knowledge): TLS 없이 HTTP/2 직접 사용
+- TLS h2는 Phase 8 (rustls + rcgen)에서 처리
+- Generator: `h2` 0.4 crate (저수준 API, 세밀한 스트림 제어)
+- Responder: `hyper` 1.x `http2::Builder` (서비스 함수 재사용, 심플)
+- `SendRequest::clone()`으로 동일 TCP 연결에서 다중 스트림 워커 공유
+
+---
+
+## Booster Phase: TCP 프로토콜 + 다중 Pair 토폴로지 + TestConfig 전면 전환 ✅
+
+**목표:** 단일 HTTP 대상 → 다중 Pair (TCP+HTTP 혼합) 지원, 프로토콜 독립적 계측
+
+**달성 사항:**
+
+### 1. TestProfile → TestConfig 전면 전환
+- [x] **`TestConfig`** (구 TestProfile) 신규 구조 설계:
+  - `pairs: Vec<PairConfig>` — 다중 클라이언트/서버 쌍
+  - `default_load: LoadConfig` — pairs 공통 기본 부하 설정
+  - `ns_config: NsConfig` — 네임스페이스 설정 분리
+- [x] **`PairConfig`**: `id`, `protocol`, `client: ClientEndpoint`, `server: ServerEndpoint`, `payload: PayloadProfile`, `load: Option<LoadConfig>`
+- [x] **`PayloadProfile`** enum (`#[serde(tag="type")]`):
+  - `Tcp(TcpPayload)` — `client_tx_bytes`, `server_tx_bytes`
+  - `Http(HttpPayload)` — `method`, `path`, `request_body_bytes`, `response_body_bytes`, `h2_max_concurrent_streams`
+- [x] **`LoadConfig`**: `target_cps`, `target_cc`, `max_inflight`, `connect_timeout_ms`, `response_timeout_ms`
+- [x] **`Protocol`**: `Http1` | `Http2` | `Tcp` 추가
+- [x] `Display for Protocol` → `core/src/config.rs` (orphan rule 준수)
+
+### 2. TCP 프로토콜 지원
+- [x] **`responder/src/tcp.rs`** (신규): TCP accept loop + per-connection 핸들러
+  - client_tx bytes 수신 → server_tx bytes 응답 (ping-pong) 반복
+  - 서버 사이드 메트릭 기록 (global + proto dual collector)
+- [x] **Generator**: TCP CPS (신규 연결 ping-pong), CC/BW (스트리밍) 구현
+- [x] 멀티 Responder: `handles: Vec<JoinHandle<()>>`, `stop_all()` API
+
+### 3. 다중 Pair 네트워크 토폴로지
+- [x] **NS 토폴로지 개편 (/24 서브넷 + IP 앨리어싱)**:
+  - client NS: `10.10.1.1/24` (veth-c1)
+  - host: `veth-c0(10.10.1.254/24)`, `veth-s0(10.20.1.254/24)`
+  - server NS: `10.20.1.1/24` + 추가 서버별 앨리어스 (`10.20.1.N/24`)
+- [x] **`assign_pair_addrs()`**: pair 순서대로 서버 IP 할당, 추가 IP는 `ip addr add` 앨리어스
+- [x] **로컬 모드**: server_id 중복 체크로 동일 포트 이중 바인드 방지
+- [x] **Dual Collector 패턴**: 각 pair worker가 `global: Arc<Collector>` + `proto: Arc<Collector>` 양쪽에 기록
+- [x] **`MultiAggregator`**: 전체 rate 집계 + `by_protocol: HashMap<String, PerProtocolSnapshot>`
+
+### 4. Frontend 전면 개편
+- [x] **`api/client.ts`**: `TestConfig`, `PairConfig`, `PayloadProfile`, `LoadConfig`, `PerProtocolSnapshot` 신규 타입
+- [x] **`TestControl.tsx`** (완전 재작성): Pairs 테이블 + PairDialog 모달 편집기
+  - Protocol 선택에 따라 TCP/HTTP 페이로드 폼 전환
+  - 클라이언트/서버 엔드포인트, 선택적 per-pair 부하 오버라이드
+- [x] **`ProfileManager.tsx`**: TestConfig 기반 저장 프로파일 관리
+- [x] **`Results.tsx`**, **`TopologyView.tsx`**, **`MetricsPanel.tsx`**: `profile.*` → `config.*` 필드 경로 업데이트
+
+### 트러블슈팅
+- E0117 orphan rule: `Display for Protocol` → `core/src/config.rs`로 이동
+- E0521 borrow escape: `let pair_id = pair.id.clone()` before `tokio::spawn`
+- E0063 missing field: `MetricsSnapshot { by_protocol: HashMap::new(), ... }`
+- TS6133 unused `setField`: `PairDialog`에서 제거
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 0.08s
+npm run build → ✓ built in 2.16s
+```
 
 ---
 
@@ -201,3 +283,5 @@ DELETE /api/profiles/:id     → 프로파일 삭제
 
 - `testbed/topology.md`: 네트워크 토폴로지 및 수동 설정 예시
 - `CLAUDE.md`: 프로젝트 요구사항 전체
+- `docs/MODE.md`: 시험 모드(CPS/CC/BW × HTTP/1.1/HTTP/2) 동작 및 계측 지표 정리
+- `docs/TODO.md`: 잔여 작업 목록 (P1/P2/Phase7+)

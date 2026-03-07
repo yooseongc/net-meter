@@ -194,6 +194,7 @@ impl Collector {
             rps: 0.0,
             bytes_tx_per_sec: 0.0,
             bytes_rx_per_sec: 0.0,
+            by_protocol: std::collections::HashMap::new(),
         }
     }
 

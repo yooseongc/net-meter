@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use net_meter_core::{TestProfile, TestState};
+use net_meter_core::{TestConfig, TestState};
 use serde::Serialize;
 use tracing::info;
 
@@ -20,29 +20,25 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[derive(Serialize)]
 struct TestStatus {
     state: TestState,
-    profile: Option<TestProfile>,
+    config: Option<TestConfig>,
     elapsed_secs: Option<u64>,
 }
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> {
     let test_state = *state.test_state.read().await;
-    let profile = state.active_profile.read().await.clone();
+    let config = state.active_config.read().await.clone();
     let elapsed_secs = state
         .test_start_time
         .read()
         .await
         .map(|t| t.elapsed().as_secs());
 
-    Json(TestStatus {
-        state: test_state,
-        profile,
-        elapsed_secs,
-    })
+    Json(TestStatus { state: test_state, config, elapsed_secs })
 }
 
 async fn start_handler(
     State(state): State<Arc<AppState>>,
-    Json(profile): Json<TestProfile>,
+    Json(config): Json<TestConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let current = *state.test_state.read().await;
     if current != TestState::Idle && current != TestState::Completed && current != TestState::Failed
@@ -53,15 +49,12 @@ async fn start_handler(
         ));
     }
 
-    info!(profile_name = %profile.name, "Received start request");
+    info!(config_name = %config.name, pairs = config.pairs.len(), "Received start request");
 
-    let metrics = Arc::clone(&state.metrics);
     let state_clone = Arc::clone(&state);
-
-    // 오케스트레이터에 위임 (non-blocking: 별도 태스크에서 실행)
     tokio::spawn(async move {
         let mut orch = state_clone.orchestrator.lock().await;
-        orch.start(profile, metrics, Arc::clone(&state_clone)).await;
+        orch.start(config, Arc::clone(&state_clone)).await;
     });
 
     Ok(Json(serde_json::json!({ "status": "starting" })))

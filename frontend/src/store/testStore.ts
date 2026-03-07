@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import {
   MetricsSnapshot,
-  TestProfile,
+  TestConfig,
   TestResult,
   TestState,
   api,
@@ -13,21 +13,21 @@ const MAX_HISTORY = 300 // 최대 5분 분량 히스토리
 interface TestStore {
   // 상태
   testState: TestState
-  activeProfile: TestProfile | null
+  activeProfile: TestConfig | null    // activeProfile 이름 유지 (하위 컴포넌트 호환)
   elapsedSecs: number | null
   latestSnapshot: MetricsSnapshot | null
   snapshotHistory: MetricsSnapshot[]
-  savedProfiles: TestProfile[]
+  savedProfiles: TestConfig[]         // savedProfiles 이름 유지
   testResults: TestResult[]
   wsConnected: boolean
   error: string | null
 
   // 액션
   fetchStatus: () => Promise<void>
-  startTest: (profile: TestProfile) => Promise<void>
+  startTest: (config: TestConfig) => Promise<void>
   stopTest: () => Promise<void>
   fetchProfiles: () => Promise<void>
-  saveProfile: (profile: TestProfile) => Promise<void>
+  saveProfile: (config: TestConfig) => Promise<void>
   deleteProfile: (id: string) => Promise<void>
   fetchResults: () => Promise<void>
   deleteResult: (id: string) => Promise<void>
@@ -53,7 +53,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
       const status = await api.status()
       set({
         testState: status.state,
-        activeProfile: status.profile,
+        activeProfile: status.config,
         elapsedSecs: status.elapsed_secs,
         error: null,
       })
@@ -62,10 +62,10 @@ export const useTestStore = create<TestStore>((set, get) => ({
     }
   },
 
-  startTest: async (profile) => {
+  startTest: async (config) => {
     try {
-      await api.startTest(profile)
-      set({ testState: 'preparing', activeProfile: profile, elapsedSecs: 0, error: null })
+      await api.startTest(config)
+      set({ testState: 'preparing', activeProfile: config, elapsedSecs: 0, error: null })
     } catch (e) {
       set({ error: String(e) })
     }
@@ -89,9 +89,9 @@ export const useTestStore = create<TestStore>((set, get) => ({
     }
   },
 
-  saveProfile: async (profile) => {
+  saveProfile: async (config) => {
     try {
-      const saved = await api.createProfile(profile)
+      const saved = await api.createProfile(config)
       set((s) => ({
         savedProfiles: [...s.savedProfiles.filter((p) => p.id !== saved.id), saved],
         error: null,
@@ -142,13 +142,11 @@ export const useTestStore = create<TestStore>((set, get) => ({
           if (history.length > MAX_HISTORY) history.shift()
           return { latestSnapshot: snap, snapshotHistory: history, wsConnected: true }
         })
-        // 메트릭 수신 시 상태도 갱신
         get().fetchStatus()
       },
       () => {
         wsInstance = null
         set({ wsConnected: false })
-        // 3초 후 재연결
         setTimeout(() => get().connectWs(), 3000)
       },
     )
