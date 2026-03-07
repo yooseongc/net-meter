@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   TestConfig, TestType, Protocol, HttpMethod,
   PairConfig, PayloadProfile, LoadConfig, NsConfig,
@@ -171,6 +171,18 @@ function PairDialog({
           </div>
         </Row>
 
+        {/* TLS (HTTP only) */}
+        {!isTcp && (
+          <Field label="TLS">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" checked={p.tls ?? false}
+                onChange={(e) => setP((prev) => ({ ...prev, tls: e.target.checked }))}
+                style={{ width: 'auto' }} />
+              Enable TLS (self-signed cert, HTTP/1.1 HTTPS / HTTP/2 over TLS)
+            </label>
+          </Field>
+        )}
+
         {/* Payload */}
         {isTcp ? (
           <>
@@ -265,12 +277,21 @@ function PairDialog({
 // ---------------------------------------------------------------------------
 
 export default function TestControl() {
-  const { testState, startTest, stopTest, savedProfiles } = useTestStore()
+  const { testState, startTest, stopTest, savedProfiles, saveProfile, draftConfig, setDraftConfig } = useTestStore()
   const [config, setConfig] = useState<TestConfig>(defaultConfig)
   const [editingPair, setEditingPair] = useState<PairConfig | null>(null)
   const [isNewPair, setIsNewPair] = useState(false)
+  const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
   const isRunning = testState === 'running' || testState === 'preparing' || testState === 'stopping'
+
+  // Profiles 탭에서 "Load" 클릭 시 draftConfig가 설정되면 적용
+  useEffect(() => {
+    if (draftConfig) {
+      setConfig({ ...draftConfig })
+      setDraftConfig(null)
+    }
+  }, [draftConfig])
 
   const setField = <K extends keyof TestConfig>(key: K, val: TestConfig[K]) =>
     setConfig((prev) => ({ ...prev, [key]: val }))
@@ -357,8 +378,18 @@ export default function TestControl() {
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {/* 헤더 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="card-title" style={{ margin: 0 }}>Test Control</div>
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div className="card-title" style={{ margin: 0 }}>Test Config</div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            {saveMsg && <span style={{ fontSize: 11, color: '#3fb950' }}>{saveMsg}</span>}
+            <button className="btn-secondary"
+              onClick={async () => {
+                await saveProfile(config)
+                setSaveMsg('Saved!')
+                setTimeout(() => setSaveMsg(null), 2000)
+              }}
+              style={{ padding: '4px 10px', fontSize: 11 }}>
+              Save to Profiles
+            </button>
             <button className="btn-secondary" onClick={exportConfig} style={{ padding: '4px 10px', fontSize: 11 }}>Export</button>
             <label className="btn-secondary" style={{ padding: '4px 10px', fontSize: 11, cursor: 'pointer', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#e6edf3', fontWeight: 600 }}>
               Import

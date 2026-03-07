@@ -261,6 +261,9 @@ pub struct PairConfig {
     /// 이 pair에 대해 병렬로 실행할 클라이언트 워커 수 (기본 1)
     #[serde(default = "default_one")]
     pub client_count: u32,
+    /// TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)
+    #[serde(default)]
+    pub tls: bool,
 }
 
 fn default_one() -> u32 { 1 }
@@ -341,6 +344,7 @@ impl TestConfig {
             payload: PayloadProfile::Http(HttpPayload::default()),
             load: None,
             client_count: 1,
+            tls: false,
         };
         Self {
             id: uuid::Uuid::new_v4().to_string(),

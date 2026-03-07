@@ -10,7 +10,7 @@ type Tab = 'monitor' | 'config' | 'topology' | 'profiles' | 'results'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('monitor')
-  const { connectWs, fetchStatus, fetchProfiles, fetchResults } = useTestStore()
+  const { connectWs, fetchStatus, fetchProfiles, fetchResults, setDraftConfig } = useTestStore()
 
   useEffect(() => {
     fetchStatus()
@@ -19,14 +19,22 @@ export default function App() {
     connectWs()
   }, [])
 
+  const handleLoadConfig = (c: NonNullable<Parameters<typeof setDraftConfig>[0]>) => {
+    setDraftConfig(c)
+    setTab('config')
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header tab={tab} setTab={setTab} />
       <main style={styles.main}>
         {tab === 'monitor' && <Dashboard />}
-        {tab === 'config' && <TestControl />}
+        {/* TestControl은 항상 마운트 상태로 유지하여 탭 전환 시 설정이 유실되지 않도록 한다 */}
+        <div style={{ display: tab === 'config' ? 'block' : 'none' }}>
+          <TestControl />
+        </div>
         {tab === 'topology' && <TopologyView />}
-        {tab === 'profiles' && <ProfileManager />}
+        {tab === 'profiles' && <ProfileManager onLoadConfig={handleLoadConfig} />}
         {tab === 'results' && <Results />}
       </main>
     </div>

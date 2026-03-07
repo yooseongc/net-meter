@@ -3,6 +3,7 @@ mod event;
 mod orchestrator;
 mod result;
 mod state;
+mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -41,6 +42,12 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls 0.23은 ring + aws-lc-rs 둘 다 컴파일되면 provider를 자동 결정하지 못해 panic.
+    // 명시적으로 ring provider를 설치한다.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls ring CryptoProvider");
+
     let cli = Cli::parse();
 
     // 로깅 초기화

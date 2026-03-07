@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use net_meter_core::{PayloadProfile, Protocol, TestConfig, TestType};
 use net_meter_metrics::Collector;
+use rustls::ClientConfig;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -31,6 +32,7 @@ impl Generator {
     /// `pair_addrs`: pair_id → "host:port" 맵 (오케스트레이터가 계산)
     /// `proto_collectors`: Protocol → Arc<Collector> 맵 (per-protocol 집계용)
     /// `client_ns`: Some(name)이면 해당 NS로 진입 후 실행
+    /// `tls_client_config`: TLS가 활성화된 pair에서 사용할 ClientConfig
     pub async fn start(
         &mut self,
         config: &TestConfig,
@@ -38,6 +40,7 @@ impl Generator {
         proto_collectors: &HashMap<Protocol, Arc<Collector>>,
         pair_addrs: &HashMap<String, String>,
         client_ns: Option<String>,
+        tls_client_config: Option<Arc<ClientConfig>>,
     ) {
         info!(
             pairs = config.pairs.len(),
@@ -66,12 +69,16 @@ impl Generator {
                 .unwrap_or_else(Collector::new);
             let worker_count = pair.client_count.max(1) as usize;
 
+            // pair.tls가 true이고 TLS config가 있을 때만 TLS 사용
+            let pair_tls = if pair.tls { tls_client_config.clone() } else { None };
+
             for worker_idx in 0..worker_count {
                 let g = Arc::clone(&global);
                 let p = Arc::clone(&p);
                 let addr = addr.clone();
                 let load = load.clone();
                 let payload = payload.clone();
+                let tls = pair_tls.clone();
 
                 let (tx, rx) = oneshot::channel();
                 self.shutdown_txs.push(tx);
@@ -84,7 +91,7 @@ impl Generator {
                         let _ = tokio::task::spawn_blocking(move || {
                             run_pair_in_ns(
                                 test_type, &addr, protocol, payload, load,
-                                g, p, rx, duration_secs, &ns_name,
+                                g, p, rx, duration_secs, &ns_name, tls,
                             )
                         })
                         .await;
@@ -93,7 +100,7 @@ impl Generator {
                     let pair_id = pair.id.clone();
                     tokio::spawn(async move {
                         info!(%pair_id, %protocol, worker_idx, "Pair worker starting (local mode)");
-                        run_pair(test_type, &addr, protocol, payload, load, g, p, rx, duration_secs).await;
+                        run_pair(test_type, &addr, protocol, payload, load, g, p, rx, duration_secs, tls).await;
                     })
                 };
 
@@ -133,9 +140,10 @@ async fn run_pair(
     proto: Arc<Collector>,
     shutdown: oneshot::Receiver<()>,
     duration_secs: u64,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let deadline = make_deadline(duration_secs);
-    dispatch(test_type, addr, protocol, &payload, &load, global, proto, shutdown, deadline).await;
+    dispatch(test_type, addr, protocol, &payload, &load, global, proto, shutdown, deadline, tls).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,14 +161,13 @@ fn run_pair_in_ns(
     rx: oneshot::Receiver<()>,
     duration_secs: u64,
     ns_name: &str,
+    tls: Option<Arc<ClientConfig>>,
 ) {
-    // 호스트 NS 저장
     let orig = match std::fs::File::open("/proc/self/ns/net") {
         Ok(f) => f,
         Err(e) => { tracing::error!("Failed to open host ns: {}", e); return; }
     };
 
-    // client NS 진입
     let ns_path = format!("/var/run/netns/{}", ns_name);
     let ns_file = match std::fs::File::open(&ns_path) {
         Ok(f) => f,
@@ -185,10 +192,9 @@ fn run_pair_in_ns(
 
     let deadline = make_deadline(duration_secs);
     rt.block_on(async move {
-        dispatch(test_type, addr, protocol, &payload, &load, global, proto, rx, deadline).await;
+        dispatch(test_type, addr, protocol, &payload, &load, global, proto, rx, deadline, tls).await;
     });
 
-    // 호스트 NS 복구
     if let Err(e) = nix::sched::setns(&orig, nix::sched::CloneFlags::CLONE_NEWNET) {
         tracing::error!("Failed to restore host ns: {}", e);
     }
@@ -208,16 +214,17 @@ async fn dispatch(
     proto: Arc<Collector>,
     shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     match (protocol, payload) {
         (Protocol::Tcp, PayloadProfile::Tcp(p)) => {
             tcp::run(test_type, addr, load, p, global, proto, shutdown, deadline).await;
         }
         (Protocol::Http1, PayloadProfile::Http(p)) => {
-            http1::run(test_type, addr, load, p, global, proto, shutdown, deadline).await;
+            http1::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls).await;
         }
         (Protocol::Http2, PayloadProfile::Http(p)) => {
-            http2::run(test_type, addr, load, p, global, proto, shutdown, deadline).await;
+            http2::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls).await;
         }
         (proto, payload) => {
             tracing::error!(
@@ -243,4 +250,3 @@ fn make_deadline(duration_secs: u64) -> Option<Instant> {
         None
     }
 }
-

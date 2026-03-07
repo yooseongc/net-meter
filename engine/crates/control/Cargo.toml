@@ -27,3 +27,6 @@ clap = { workspace = true }
 socket2 = { workspace = true }
 async-stream = { workspace = true }
 futures-core = "0.3"
+rustls = { workspace = true }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }

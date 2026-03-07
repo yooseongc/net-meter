@@ -73,6 +73,7 @@ export interface PairConfig {
   payload: PayloadProfile
   load?: LoadConfig
   client_count?: number
+  tls?: boolean
 }
 
 export interface NsConfig {

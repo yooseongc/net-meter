@@ -16,3 +16,5 @@ nix = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }

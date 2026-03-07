@@ -7,8 +7,8 @@ function configSummary(c: TestConfig): string {
   return `${c.test_type.toUpperCase()} · ${protos} · ${c.pairs.length} pair(s) · ${c.duration_secs}s`
 }
 
-export default function ProfileManager() {
-  const { savedProfiles, saveProfile, deleteProfile } = useTestStore()
+export default function ProfileManager({ onLoadConfig }: { onLoadConfig?: (c: TestConfig) => void }) {
+  const { savedProfiles, deleteProfile } = useTestStore()
   const [expanded, setExpanded] = useState<string | null>(null)
 
   return (
@@ -16,13 +16,13 @@ export default function ProfileManager() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h2 style={{ fontSize: 16, fontWeight: 600 }}>Saved Configs</h2>
         <span style={{ fontSize: 12, color: '#8b949e' }}>
-          Configs are saved from Test Control via Export / Save.
+          Config 탭에서 "Save to Profiles"로 저장합니다.
         </span>
       </div>
 
       {savedProfiles.length === 0 ? (
         <div className="card" style={{ color: '#8b949e', fontSize: 14, textAlign: 'center', padding: 32 }}>
-          No saved configs. Use Test Control to export and save a config.
+          저장된 설정이 없습니다. Config 탭에서 "Save to Profiles"를 눌러 저장하세요.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -38,11 +38,13 @@ export default function ProfileManager() {
                   style={{ padding: '3px 10px', fontSize: 12 }}>
                   {expanded === c.id ? 'Hide' : 'Details'}
                 </button>
-                <button className="btn-secondary"
-                  onClick={() => saveProfile(c)}
-                  style={{ padding: '3px 10px', fontSize: 12 }}>
-                  Re-save
-                </button>
+                {onLoadConfig && (
+                  <button className="btn-primary"
+                    onClick={() => onLoadConfig(c)}
+                    style={{ padding: '3px 10px', fontSize: 12 }}>
+                    Load
+                  </button>
+                )}
                 <button className="btn-danger"
                   onClick={() => deleteProfile(c.id)}
                   style={{ padding: '3px 10px', fontSize: 12 }}>

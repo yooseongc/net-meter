@@ -32,6 +32,8 @@ interface TestStore {
   wsConnected: boolean
   error: string | null
   eventLog: EventLogEntry[]
+  /** Profiles 탭에서 Config 탭으로 설정을 전달할 때 사용 */
+  draftConfig: TestConfig | null
 
   // 액션
   fetchStatus: () => Promise<void>
@@ -45,6 +47,7 @@ interface TestStore {
   connectWs: () => void
   disconnectWs: () => void
   clearEventLog: () => void
+  setDraftConfig: (c: TestConfig | null) => void
 }
 
 let wsInstance: WebSocket | null = null
@@ -87,6 +90,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
   wsConnected: false,
   error: null,
   eventLog: [],
+  draftConfig: null,
 
   fetchStatus: async () => {
     try {
@@ -226,4 +230,6 @@ export const useTestStore = create<TestStore>((set, get) => ({
   },
 
   clearEventLog: () => set({ eventLog: [] }),
+
+  setDraftConfig: (c) => set({ draftConfig: c }),
 }))

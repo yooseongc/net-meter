@@ -5,12 +5,14 @@ use bytes::Bytes;
 use http::{Method, Request};
 use net_meter_core::{HttpMethod, HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::Collector;
+use rustls::ClientConfig;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio_rustls::TlsConnector;
 use tracing::debug;
 
-/// HTTP/2 h2c 트래픽 발생 진입점
+/// HTTP/2 트래픽 발생 진입점 (h2c 또는 TLS h2)
 pub async fn run(
     test_type: TestType,
     addr: &str,
@@ -20,16 +22,17 @@ pub async fn run(
     proto: Arc<Collector>,
     shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline).await,
+        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, tls).await,
+        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, tls).await,
+        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, tls).await,
     }
 }
 
 // ---------------------------------------------------------------------------
-// CPS: 초당 신규 h2c 연결
+// CPS: 초당 신규 h2 연결
 // ---------------------------------------------------------------------------
 
 async fn run_cps(
@@ -40,6 +43,7 @@ async fn run_cps(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let target_cps = load.effective_cps();
     let max_inflight = load.effective_max_inflight() as usize;
@@ -86,9 +90,10 @@ async fn run_cps(
                 let h = host.clone();
                 let me = method.clone();
                 let pa = path.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    single_request_h2c(&a, &h, me, &pa, req_body, g, p, connect_to, response_to).await;
+                    single_request_h2(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, tls).await;
                 });
             }
         }
@@ -96,7 +101,7 @@ async fn run_cps(
 }
 
 // ---------------------------------------------------------------------------
-// CC: 동시 h2c 연결 유지
+// CC: 동시 h2 연결 유지
 // ---------------------------------------------------------------------------
 
 async fn run_cc(
@@ -107,6 +112,7 @@ async fn run_cc(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -125,8 +131,9 @@ async fn run_cc(
         let h = host.clone();
         let me = method.clone();
         let pa = path.clone();
+        let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, 1).await;
+            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, 1, tls).await;
         }));
     }
 
@@ -149,6 +156,7 @@ async fn run_bw(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let concurrency = load.effective_cc() as usize;
     let streams_per_conn = payload.h2_max_concurrent_streams.unwrap_or(10) as usize;
@@ -168,8 +176,9 @@ async fn run_bw(
         let h = host.clone();
         let me = method.clone();
         let pa = path.clone();
+        let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, streams_per_conn).await;
+            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, streams_per_conn, tls).await;
         }));
     }
 
@@ -181,10 +190,10 @@ async fn run_bw(
 }
 
 // ---------------------------------------------------------------------------
-// 단일 h2c 요청 (CPS)
+// 단일 h2 요청 (CPS)
 // ---------------------------------------------------------------------------
 
-async fn single_request_h2c(
+async fn single_request_h2(
     addr: &str,
     host: &str,
     method: Method,
@@ -194,12 +203,13 @@ async fn single_request_h2c(
     proto: Arc<Collector>,
     connect_timeout: Duration,
     response_timeout: Duration,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let send_req = match timeout(connect_timeout, connect_h2c(addr)).await {
+    let send_req = match timeout(connect_timeout, connect_h2(addr, &tls)).await {
         Ok(Ok(sr)) => {
             let us = connect_start.elapsed().as_micros() as u64;
             record_established(&global, &proto);
@@ -208,12 +218,12 @@ async fn single_request_h2c(
             sr
         }
         Ok(Err(e)) => {
-            debug!(addr, error = %e, "h2c handshake failed");
+            debug!(addr, error = %e, "h2 handshake failed");
             record_failed(&global, &proto);
             return;
         }
         Err(_) => {
-            debug!(addr, "h2c connect timed out");
+            debug!(addr, "h2 connect timed out");
             record_failed(&global, &proto);
             record_timeout(&global, &proto);
             return;
@@ -240,7 +250,7 @@ async fn single_request_h2c(
 }
 
 // ---------------------------------------------------------------------------
-// h2c 연결 워커 (CC/BW)
+// h2 연결 워커 (CC/BW)
 // ---------------------------------------------------------------------------
 
 async fn connection_worker(
@@ -255,13 +265,14 @@ async fn connection_worker(
     response_timeout: Duration,
     deadline: Option<Instant>,
     concurrent_streams: usize,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let send_req = match timeout(connect_timeout, connect_h2c(addr)).await {
+        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls)).await {
             Ok(Ok(sr)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
@@ -270,13 +281,13 @@ async fn connection_worker(
                 sr
             }
             Ok(Err(e)) => {
-                debug!(error = %e, "h2c connect failed, retrying");
+                debug!(error = %e, "h2 connect failed, retrying");
                 record_failed(&global, &proto);
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
             Err(_) => {
-                debug!("h2c connect timed out, retrying");
+                debug!("h2 connect timed out, retrying");
                 record_failed(&global, &proto);
                 record_timeout(&global, &proto);
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,18 +332,43 @@ async fn connection_worker(
 // 헬퍼
 // ---------------------------------------------------------------------------
 
-async fn connect_h2c(addr: &str) -> anyhow::Result<h2::client::SendRequest<Bytes>> {
-    let stream = TcpStream::connect(addr).await?;
-    let (send_req, connection) = h2::client::Builder::new()
-        .initial_window_size(1 << 20)
-        .handshake::<_, Bytes>(stream)
-        .await?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            debug!("h2 connection closed: {}", e);
-        }
-    });
-    Ok(send_req)
+/// h2c 또는 TLS h2 연결을 수립하고 SendRequest를 반환한다.
+async fn connect_h2(
+    addr: &str,
+    tls: &Option<Arc<ClientConfig>>,
+) -> anyhow::Result<h2::client::SendRequest<Bytes>> {
+    let tcp = TcpStream::connect(addr).await?;
+
+    if let Some(cfg) = tls {
+        // TLS h2
+        let connector = TlsConnector::from(Arc::clone(cfg));
+        let sn = rustls::pki_types::ServerName::try_from("localhost")
+            .unwrap()
+            .to_owned();
+        let tls_stream = connector.connect(sn, tcp).await?;
+        let (send_req, conn) = h2::client::Builder::new()
+            .initial_window_size(1 << 20)
+            .handshake::<_, Bytes>(tls_stream)
+            .await?;
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("h2 TLS connection closed: {}", e);
+            }
+        });
+        Ok(send_req)
+    } else {
+        // h2c (cleartext)
+        let (send_req, conn) = h2::client::Builder::new()
+            .initial_window_size(1 << 20)
+            .handshake::<_, Bytes>(tcp)
+            .await?;
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("h2c connection closed: {}", e);
+            }
+        });
+        Ok(send_req)
+    }
 }
 
 async fn send_h2_stream(

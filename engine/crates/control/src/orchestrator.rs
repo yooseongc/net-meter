@@ -11,7 +11,6 @@ use net_meter_responder::Responder;
 use tracing::{error, info};
 
 use crate::event::TestEvent;
-
 use crate::result::TestResult;
 use crate::state::AppState;
 
@@ -37,7 +36,8 @@ impl Orchestrator {
     /// 시험을 시작한다.
     ///
     /// 1. 프로토콜별 Collector 생성 및 MultiAggregator 등록
-    /// 2. NS 모드 또는 로컬 모드로 분기
+    /// 2. TLS pair 존재 시 자체 서명 인증서 생성
+    /// 3. NS 모드 또는 로컬 모드로 분기
     pub async fn start(&mut self, config: TestConfig, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Preparing;
         *state.active_config.write().await = Some(config.clone());
@@ -64,10 +64,32 @@ impl Orchestrator {
         }
         *state.protocol_metrics.write().await = proto_collectors.clone();
 
+        // TLS pair 존재 시 자체 서명 인증서 번들 생성
+        let has_tls_pair = config.pairs.iter().any(|p| {
+            p.tls && matches!(p.protocol, Protocol::Http1 | Protocol::Http2)
+        });
+        let tls_bundle = if has_tls_pair {
+            match crate::tls::build() {
+                Ok(b) => {
+                    info!("TLS bundle ready (self-signed cert)");
+                    Some(b)
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to build TLS bundle");
+                    *state.test_state.write().await = TestState::Failed;
+                    let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         info!(
             config_name = %config.name,
             pairs = config.pairs.len(),
             use_namespace = config.ns_config.use_namespace,
+            tls = has_tls_pair,
             "Starting test"
         );
         let _ = state.event_tx.send(TestEvent::TestStarted {
@@ -78,24 +100,26 @@ impl Orchestrator {
 
         if config.ns_config.use_namespace {
             match self
-                .start_ns_mode(config, proto_collectors, Arc::clone(&state))
+                .start_ns_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
                     error!(error = %e, "Failed to start test in namespace mode");
                     *state.test_state.write().await = TestState::Failed;
+                    let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                 }
             }
         } else {
             match self
-                .start_local_mode(config, proto_collectors, Arc::clone(&state))
+                .start_local_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
                 .await
             {
                 Ok(()) => {}
                 Err(e) => {
                     error!(error = %e, "Failed to start test in local mode");
                     *state.test_state.write().await = TestState::Failed;
+                    let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                 }
             }
         }
@@ -107,14 +131,16 @@ impl Orchestrator {
         config: TestConfig,
         proto_collectors: HashMap<Protocol, Arc<Collector>>,
         state: Arc<AppState>,
+        tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
         let tcp_quickack = config.ns_config.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
-
-        // pair_addrs: pair_id → "host:port"
         let pair_addrs = config.local_server_addrs();
 
-        // 고유 server_id별로 Responder 하나씩 시작 (같은 서버를 공유하는 pair는 중복 시작 방지)
+        let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
+        let client_tls = tls_bundle.map(|b| b.client_config);
+
+        // 고유 server_id별로 Responder 하나씩 시작
         let mut started: HashSet<String> = HashSet::new();
         for pair in &config.pairs {
             if !started.insert(pair.server.id.clone()) {
@@ -130,6 +156,9 @@ impl Orchestrator {
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
+            // pair.tls가 true일 때만 ServerConfig 전달
+            let pair_server_tls = if pair.tls { server_tls.clone() } else { None };
+
             self.responder
                 .start_server(
                     bind_addr,
@@ -138,16 +167,16 @@ impl Orchestrator {
                     Arc::clone(&global),
                     proto_col,
                     tcp_quickack,
+                    pair_server_tls,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Responder start failed: {}", e))?;
         }
 
-        // Responder 소켓 준비 대기
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, None)
+            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls)
             .await;
 
         self.transition_to_running(config, state).await;
@@ -160,6 +189,7 @@ impl Orchestrator {
         config: TestConfig,
         proto_collectors: HashMap<Protocol, Arc<Collector>>,
         state: Arc<AppState>,
+        tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
         net_meter_ns::check_capability().map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -167,7 +197,6 @@ impl Orchestrator {
         ns.setup().await.map_err(|e| anyhow::anyhow!("{}", e))?;
         let _ = state.event_tx.send(TestEvent::NsSetupComplete);
 
-        // 서버 IP 할당 + server NS에 alias 추가
         let (pair_addrs, server_binds) = ns
             .assign_pair_addrs(&config.pairs)
             .await
@@ -178,21 +207,22 @@ impl Orchestrator {
         let tcp_quickack = config.ns_config.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
 
-        // server_id → (protocol, payload): 각 고유 서버가 어떤 프로토콜/페이로드를 사용하는지
-        let mut server_proto_map: HashMap<String, (Protocol, PayloadProfile)> = HashMap::new();
+        let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
+        let client_tls = tls_bundle.map(|b| b.client_config);
+
+        let mut server_proto_map: HashMap<String, (Protocol, PayloadProfile, bool)> = HashMap::new();
         for pair in &config.pairs {
             server_proto_map
                 .entry(pair.server.id.clone())
-                .or_insert_with(|| (pair.protocol, pair.payload.clone()));
+                .or_insert_with(|| (pair.protocol, pair.payload.clone(), pair.tls));
         }
 
-        // 고유 서버별로 NS 내 Responder 시작
         for (server_id, bind_addr_str) in &server_binds {
             let bind_addr: SocketAddr = bind_addr_str
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid bind addr {}: {}", bind_addr_str, e))?;
 
-            let (protocol, ref payload) = match server_proto_map.get(server_id) {
+            let (protocol, ref payload, pair_tls) = match server_proto_map.get(server_id) {
                 Some(v) => v.clone(),
                 None => continue,
             };
@@ -201,6 +231,8 @@ impl Orchestrator {
                 .get(&protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
+
+            let pair_server_tls = if pair_tls { server_tls.clone() } else { None };
 
             self.responder
                 .start_server_in_ns(
@@ -211,16 +243,16 @@ impl Orchestrator {
                     Arc::clone(&global),
                     proto_col,
                     tcp_quickack,
+                    pair_server_tls,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Responder NS start failed for {}: {}", server_id, e))?;
         }
 
-        // Responder 소켓 준비 대기
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name))
+            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_tls)
             .await;
 
         self.ns_manager = Some(ns);
@@ -285,14 +317,12 @@ impl Orchestrator {
             let _ = state.event_tx.send(TestEvent::NsTeardownComplete);
         }
 
-        // MultiAggregator 프로토콜 컬렉터 정리
         {
             let mut agg = state.aggregator.lock().await;
             agg.clear_protocol_collectors();
         }
         *state.protocol_metrics.write().await = HashMap::new();
 
-        // 시험 결과 저장
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -315,7 +345,7 @@ impl Orchestrator {
                 final_snapshot,
             };
             let mut results = state.test_results.write().await;
-            results.insert(0, result); // 최신 순
+            results.insert(0, result);
             if results.len() > 50 {
                 results.truncate(50);
             }

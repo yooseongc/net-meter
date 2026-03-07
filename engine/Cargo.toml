@@ -62,6 +62,11 @@ hdrhistogram = "7"
 # SSE 스트림 (이벤트 로그 API)
 async-stream = "0.3"
 
+# TLS 지원
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+tokio-rustls = "0.26"
+
 # internal crates
 net-meter-core      = { path = "crates/core" }
 net-meter-metrics   = { path = "crates/metrics" }

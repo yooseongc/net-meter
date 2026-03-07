@@ -3,12 +3,17 @@ use std::time::{Duration, Instant};
 
 use net_meter_core::{HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::Collector;
+use rustls::ClientConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio_rustls::TlsConnector;
 use tracing::debug;
+
+// boxed reader/writer — TLS와 평문 스트림을 통합 처리
+type DynReader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type DynWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
 /// HTTP/1.1 트래픽 발생 진입점
 pub async fn run(
@@ -20,11 +25,12 @@ pub async fn run(
     proto: Arc<Collector>,
     shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline).await,
-        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline).await,
+        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, tls).await,
+        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, tls).await,
+        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, tls).await,
     }
 }
 
@@ -40,6 +46,7 @@ async fn run_cps(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let target_cps = load.effective_cps();
     let max_inflight = load.effective_max_inflight() as usize;
@@ -58,7 +65,6 @@ async fn run_cps(
     let addr = addr.to_string();
 
     let ramp_start = Instant::now();
-    // token_acc: ramp-up 중 허용 토큰 누적 (≥ 1이면 연결 1개 허용)
     let mut token_acc: f64 = if ramp_up_secs == 0 { 1.0 } else { 0.0 };
 
     loop {
@@ -68,7 +74,6 @@ async fn run_cps(
             _ = ticker.tick() => {
                 if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
-                // Ramp-up: 경과 시간에 비례해 토큰 누적
                 if ramp_up_secs > 0 {
                     let scale = (ramp_start.elapsed().as_secs_f64() / ramp_up_secs as f64).min(1.0);
                     token_acc = (token_acc + scale).min(1.0);
@@ -86,9 +91,10 @@ async fn run_cps(
                 let a = addr.clone();
                 let me = method.clone();
                 let pa = path.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to).await;
+                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to, tls).await;
                 });
             }
         }
@@ -107,6 +113,7 @@ async fn run_cc(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -123,8 +130,9 @@ async fn run_cc(
         let a = addr.clone();
         let me = method.clone();
         let pa = path.clone();
+        let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls).await;
         }));
     }
 
@@ -147,6 +155,7 @@ async fn run_bw(
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let concurrency = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
@@ -163,8 +172,9 @@ async fn run_bw(
         let a = addr.clone();
         let me = method.clone();
         let pa = path.clone();
+        let tls = tls.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls).await;
         }));
     }
 
@@ -176,7 +186,7 @@ async fn run_bw(
 }
 
 // ---------------------------------------------------------------------------
-// 단일 요청 (Connection: close)
+// 단일 요청 (CPS, Connection: close)
 // ---------------------------------------------------------------------------
 
 async fn single_request(
@@ -188,19 +198,14 @@ async fn single_request(
     proto: Arc<Collector>,
     connect_timeout: Duration,
     response_timeout: Duration,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => {
-            let us = connect_start.elapsed().as_micros() as u64;
-            record_established(&global, &proto);
-            global.record_connect_latency(us);
-            proto.record_connect_latency(us);
-            s
-        }
+    let tcp = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(addr, error = %e, "HTTP/1.1 connect failed");
             record_failed(&global, &proto);
@@ -214,11 +219,41 @@ async fn single_request(
         }
     };
 
-    let result = timeout(
-        response_timeout,
-        send_and_receive(stream, addr, method, path, req_body_bytes, &global, &proto),
-    )
-    .await;
+    // Optional TLS handshake
+    let result = if let Some(cfg) = tls {
+        let connector = TlsConnector::from(cfg);
+        let sn = rustls::pki_types::ServerName::try_from("localhost")
+            .unwrap()
+            .to_owned();
+        match connector.connect(sn, tcp).await {
+            Ok(tls_stream) => {
+                let us = connect_start.elapsed().as_micros() as u64;
+                record_established(&global, &proto);
+                global.record_connect_latency(us);
+                proto.record_connect_latency(us);
+                timeout(
+                    response_timeout,
+                    send_and_receive(tls_stream, addr, method, path, req_body_bytes, &global, &proto),
+                )
+                .await
+            }
+            Err(e) => {
+                debug!(addr, error = %e, "TLS handshake failed");
+                record_failed(&global, &proto);
+                return;
+            }
+        }
+    } else {
+        let us = connect_start.elapsed().as_micros() as u64;
+        record_established(&global, &proto);
+        global.record_connect_latency(us);
+        proto.record_connect_latency(us);
+        timeout(
+            response_timeout,
+            send_and_receive(tcp, addr, method, path, req_body_bytes, &global, &proto),
+        )
+        .await
+    };
 
     match result {
         Ok(Ok((status, bytes_rx))) => {
@@ -234,15 +269,18 @@ async fn single_request(
     record_closed(&global, &proto);
 }
 
-async fn send_and_receive(
-    mut stream: TcpStream,
+async fn send_and_receive<S>(
+    mut stream: S,
     host: &str,
     method: &str,
     path: &str,
     req_body_bytes: usize,
     global: &Arc<Collector>,
     proto: &Arc<Collector>,
-) -> std::io::Result<(u16, u64)> {
+) -> std::io::Result<(u16, u64)>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let header = if req_body_bytes > 0 {
         format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: net-meter/0.1\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
@@ -310,21 +348,15 @@ async fn keep_alive_session(
     connect_timeout: Duration,
     response_timeout: Duration,
     deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
-        // 새 TCP 연결 수립
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => {
-                let us = connect_start.elapsed().as_micros() as u64;
-                record_established(&global, &proto);
-                global.record_connect_latency(us);
-                proto.record_connect_latency(us);
-                s
-            }
+        let tcp = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 debug!(addr, error = %e, "HTTP/1.1 connect failed");
                 record_failed(&global, &proto);
@@ -338,17 +370,46 @@ async fn keep_alive_session(
             }
         };
 
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        // Optional TLS + split into (DynReader, DynWriter)
+        let (mut reader, mut writer) = if let Some(cfg) = &tls {
+            let connector = TlsConnector::from(Arc::clone(cfg));
+            let sn = rustls::pki_types::ServerName::try_from("localhost")
+                .unwrap()
+                .to_owned();
+            match connector.connect(sn, tcp).await {
+                Ok(tls_stream) => {
+                    let us = connect_start.elapsed().as_micros() as u64;
+                    record_established(&global, &proto);
+                    global.record_connect_latency(us);
+                    proto.record_connect_latency(us);
+                    let (r, w) = tokio::io::split(tls_stream);
+                    (Box::new(r) as DynReader, Box::new(w) as DynWriter)
+                }
+                Err(e) => {
+                    debug!(addr, error = %e, "TLS handshake failed");
+                    record_failed(&global, &proto);
+                    continue;
+                }
+            }
+        } else {
+            let us = connect_start.elapsed().as_micros() as u64;
+            record_established(&global, &proto);
+            global.record_connect_latency(us);
+            proto.record_connect_latency(us);
+            let (r, w) = tokio::io::split(tcp);
+            (Box::new(r) as DynReader, Box::new(w) as DynWriter)
+        };
 
-        // 동일 TCP 연결에서 keep-alive 반복 요청
+        let mut buffered = BufReader::new(&mut reader);
+
+        // 동일 TCP/TLS 연결에서 keep-alive 반복 요청
         loop {
             if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
             let total_start = Instant::now();
             let result = timeout(
                 response_timeout,
-                do_keepalive_request(&mut reader, &mut write_half, addr, method, path, req_body_bytes, &global, &proto),
+                do_keepalive_request(&mut buffered, &mut writer, addr, method, path, req_body_bytes, &global, &proto),
             ).await;
 
             match result {
@@ -373,11 +434,11 @@ async fn keep_alive_session(
     }
 }
 
-/// 기존 TCP 연결에서 HTTP/1.1 요청 1회 수행.
+/// 기존 연결에서 HTTP/1.1 요청 1회 수행.
 /// 반환: (status_code, rx_bytes, 연결_재사용_가능)
 async fn do_keepalive_request(
-    reader: &mut BufReader<OwnedReadHalf>,
-    writer: &mut OwnedWriteHalf,
+    reader: &mut BufReader<&mut DynReader>,
+    writer: &mut DynWriter,
     host: &str,
     method: &str,
     path: &str,
@@ -385,7 +446,6 @@ async fn do_keepalive_request(
     global: &Arc<Collector>,
     proto: &Arc<Collector>,
 ) -> std::io::Result<(u16, u64, bool)> {
-    // 요청 전송
     let header = if req_body_bytes > 0 {
         format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: net-meter/0.1\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
@@ -406,7 +466,6 @@ async fn do_keepalive_request(
     global.record_request(tx);
     proto.record_request(tx);
 
-    // 응답 헤더 파싱
     let ttfb_start = Instant::now();
     let mut status_code: u16 = 0;
     let mut content_length: Option<usize> = None;
@@ -426,7 +485,6 @@ async fn do_keepalive_request(
             let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
             global.record_ttfb(ttfb_us);
             proto.record_ttfb(ttfb_us);
-            // "HTTP/1.1 200 OK" 에서 상태코드 파싱
             status_code = line.split_whitespace()
                 .nth(1)
                 .and_then(|c| c.parse().ok())
@@ -435,7 +493,7 @@ async fn do_keepalive_request(
         }
 
         let trimmed = line.trim_end();
-        if trimmed.is_empty() { break; } // 헤더 끝 (빈 줄)
+        if trimmed.is_empty() { break; }
 
         let lower = trimmed.to_lowercase();
         if lower.starts_with("content-length:") {
@@ -445,16 +503,15 @@ async fn do_keepalive_request(
         }
     }
 
-    // Content-Length 바디 읽기
     let reuse = if let Some(len) = content_length {
         if len > 0 {
             let mut body = vec![0u8; len];
             reader.read_exact(&mut body).await?;
             total_rx += len as u64;
         }
-        server_keep_alive // Content-Length 알 때만 연결 재사용 가능
+        server_keep_alive
     } else {
-        false // chunked 또는 미지정: 연결 닫기
+        false
     };
 
     Ok((status_code, total_rx, reuse))

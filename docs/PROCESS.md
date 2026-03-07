@@ -12,8 +12,10 @@
 | 6 | Frontend UI 고도화: 차트, 프로파일 편집기 | ✅ 완료 |
 | 7 | HTTP/2 지원: h2c / TLS h2 | ✅ 완료 (h2c) |
 | Booster | TCP 프로토콜, 다중 Pair 토폴로지, TestConfig 전면 전환 | ✅ 완료 |
-| 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | 미시작 |
-| 9 | eBPF/XDP 옵션: aya 기반 패킷 계측 | 미시작 |
+| 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | ✅ 완료 |
+| 9 | ~~eBPF/XDP 옵션~~ | 취소 |
+| 10 | Association 기반 설정 전환 + VLAN 지원 | 설계 완료, 미구현 |
+| 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | 설계 완료, 미구현 |
 
 ---
 
@@ -309,27 +311,91 @@ npm run build → ✓ built in 2.11s
 
 ---
 
-## Phase 8: TLS 지원 (예정)
+## Phase 8: TLS 지원 ✅
 
 **목표:** 자체 서명 인증서로 TLS 1.2/1.3 시험
 
-**작업 계획:**
-- [ ] `rustls` + `rcgen` 자체 서명 인증서 자동 생성
-- [ ] Generator: TLS handshake latency 계측
-- [ ] Responder: TLS accept
-- [ ] TestProfile: `tls: bool`, `tls_version` 옵션
+**달성 사항:**
+- [x] `rustls 0.23` + `rcgen 0.13` + `tokio-rustls 0.26` 워크스페이스 의존성 추가
+- [x] `PairConfig.tls: bool` 필드 추가 (`#[serde(default)]`)
+- [x] `control/src/tls.rs` (신규): rcgen 자체 서명 인증서 생성 + `TlsBundle { server_config, client_config }`
+  - `NoCertVerifier`: 클라이언트 인증서 검증 비활성화 (IP 주소 직접 연결 허용)
+- [x] Responder: TLS accept 지원
+  - `start_server`, `start_server_in_ns`에 `tls_config: Option<Arc<ServerConfig>>` 파라미터 추가
+  - `TlsAcceptor::accept()` 후 `hyper` HTTP/1.1 / HTTP/2 서비스 연결
+  - `serve_http<I>` 제너릭 함수로 평문/TLS 통합 처리
+- [x] Generator HTTP/1.1 TLS 지원 (`http1.rs`):
+  - `run()`, 내부 함수에 `tls: Option<Arc<ClientConfig>>` 파라미터 추가
+  - CPS 모드: TCP connect → TLS handshake → 제너릭 `send_and_receive<S: AsyncReadExt + AsyncWriteExt + Unpin>`
+  - CC/BW 모드: TCP connect → TLS handshake → `tokio::io::split` → `DynReader/DynWriter` (Box<dyn>) → `do_keepalive_request`
+- [x] Generator HTTP/2 TLS 지원 (`http2.rs`):
+  - `connect_h2()` 함수: TLS 유무에 따라 `h2::client::Builder::new().handshake(tls_stream or tcp)` 분기
+  - `SendRequest<Bytes>` 타입 통합 (Connection은 task spawn)
+- [x] Orchestrator: TLS pair 있으면 `tls::build()` 호출, server/client config 분리 전달
+- [x] Frontend: PairDialog에 TLS 체크박스 추가 (HTTP 프로토콜에만 표시)
+- [x] `api/client.ts`: `PairConfig.tls?: boolean` 추가
+
+**아키텍처 결정:**
+- 인증서: rcgen 자체 서명, SAN `localhost` (NoCertVerifier로 IP 연결도 허용)
+- 클라이언트: `NoCertVerifier` — 인증서 검증 없음 (시험 도구 특성)
+- ServerName: `"localhost"` 고정 (SNI 전용, 검증과 무관)
+- TLS handshake latency: connect_latency에 포함 (TCP + TLS 합산)
+- DynReader/DynWriter: `Box<dyn AsyncRead/AsyncWrite + Unpin + Send>` — keep-alive TLS 지원
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 0.12s
+npm run build → ✓ built in 2.48s
+```
 
 ---
 
-## Phase 9: eBPF/XDP 옵션 (예정)
+## Phase 10: Association 기반 설정 전환 + VLAN 지원 (설계 완료)
 
-**목표:** 커널 레벨 고성능 계측 (선택적 기능)
+**목표:** Avalanche 스타일 "클라이언트 수 기반 설정", IP 대역 지정, VLAN 단일/이중 태그 지원
 
-**작업 계획:**
-- [ ] `aya` 크레이트 기반 eBPF 프로그램
-- [ ] NIC ingress 패킷 카운팅
-- [ ] TCP 흐름 식별, 지연 없는 드롭/필터링 실험
-- [ ] eBPF 없이도 핵심 기능 완전 동작 보장
+상세 설계: `docs/design-next.md`
+
+**핵심 변경:**
+- `PairConfig` → `Association` (ClientNet IP 대역 + VlanConfig 추가)
+- `TestConfig.total_clients: u32` 추가 (associations 간 균등 분배)
+- `LoadConfig`: `target_cps/cc` (시스템 전체 기준) → `cps_per_client / cc_per_client` (per-client 기준)
+- `NsConfig` → `NetworkConfig { mode: NetworkMode, ns: NsOptions, ext: Option<ExternalPortOptions> }`
+- `VlanConfig { outer_vid, inner_vid, outer_proto: VlanProto }` — single/QinQ 모두 지원
+- `ns/src/veth.rs`: `assign_client_ips()`, `add_vlan_subif()`, `add_qinq_subif()` 추가
+- Generator: per-client IP bind 소켓 (`bind(src_ip, 0)`)
+
+**VLAN 구현 방식 (Linux):**
+```bash
+# single tag
+ip link add link veth-c1 name veth-c1.100 type vlan id 100 proto 802.1Q
+# double tag (QinQ)
+ip link add link veth-c1 name veth-c1.100 type vlan id 100 proto 802.1ad
+ip link add link veth-c1.100 name veth-c1.100.200 type vlan id 200 proto 802.1Q
+```
+커널 모듈 `8021q` 필요.
+
+---
+
+## Phase 11: External Port Mode (설계 완료)
+
+**목표:** 물리 NIC 2개(inbound/outbound 포트)를 사용, 외부 DUT를 경유하는 실제 시험
+
+상세 설계: `docs/design-next.md`
+
+**트래픽 흐름:**
+```
+[net-meter Generator] --(eth1: client_iface)--> [외부 DUT] --(eth2: server_iface)--> [net-meter Responder]
+```
+
+**핵심 변경:**
+- `NetworkMode::ExternalPort` 추가
+- `ExternalPortOptions { client_iface, server_iface, client_gateway, client_gateway_mac, ... }`
+- `engine/crates/ns/src/port.rs` (신규): NIC IP 할당, VLAN subif, static ARP entry
+- Orchestrator: ExternalPort 분기 (NS 생성/삭제 스킵, port.rs 셋업/정리)
+- Generator: `bind(client_ip, 0)`, 필요 시 `SO_BINDTODEVICE`
+- Responder: `bind(server_ip, port)` (0.0.0.0 대신 특정 IP)
+- Frontend: External Port 설정 폼 + Topology 뷰 DUT 다이어그램
 
 ---
 

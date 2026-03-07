@@ -14,3 +14,5 @@ anyhow = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
