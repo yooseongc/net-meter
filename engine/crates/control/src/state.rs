@@ -6,6 +6,8 @@ use net_meter_core::{MetricsSnapshot, Protocol, TestConfig, TestState};
 use net_meter_metrics::{Collector, MultiAggregator};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+use crate::event::TestEvent;
+
 use crate::result::TestResult;
 
 /// 전역 애플리케이션 상태.
@@ -34,6 +36,9 @@ pub struct AppState {
     /// 실시간 스냅샷 브로드캐스트 (WebSocket 클라이언트에게 전송)
     pub snapshot_tx: broadcast::Sender<MetricsSnapshot>,
 
+    /// 실시간 이벤트 브로드캐스트 (SSE 클라이언트에게 전송)
+    pub event_tx: broadcast::Sender<TestEvent>,
+
     /// MultiAggregator (Mutex: 순차 접근 보장)
     pub aggregator: Mutex<MultiAggregator>,
 
@@ -52,6 +57,7 @@ impl AppState {
         let global_metrics = Collector::new();
         let aggregator = MultiAggregator::new(Arc::clone(&global_metrics));
         let (snapshot_tx, _) = broadcast::channel(64);
+        let (event_tx, _) = broadcast::channel(256);
 
         Arc::new(Self {
             test_state: RwLock::new(TestState::Idle),
@@ -61,6 +67,7 @@ impl AppState {
             protocol_metrics: RwLock::new(HashMap::new()),
             latest_snapshot: RwLock::new(MetricsSnapshot::default()),
             snapshot_tx,
+            event_tx,
             aggregator: Mutex::new(aggregator),
             orchestrator: Mutex::new(crate::orchestrator::Orchestrator::new()),
             test_start_time: RwLock::new(None),

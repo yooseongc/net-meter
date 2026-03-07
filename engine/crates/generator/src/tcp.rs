@@ -45,6 +45,7 @@ async fn run_cps(
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
 
+    let ramp_up_secs = load.ramp_up_secs;
     let sem = Arc::new(Semaphore::new(max_inflight));
     let tick_interval = Duration::from_secs_f64(1.0 / target_cps as f64);
     let mut ticker = interval(tick_interval);
@@ -54,12 +55,22 @@ async fn run_cps(
     let rx_bytes = payload.rx_bytes;
     let addr = addr.to_string();
 
+    let ramp_start = Instant::now();
+    let mut token_acc: f64 = if ramp_up_secs == 0 { 1.0 } else { 0.0 };
+
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
             _ = ticker.tick() => {
                 if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+                if ramp_up_secs > 0 {
+                    let scale = (ramp_start.elapsed().as_secs_f64() / ramp_up_secs as f64).min(1.0);
+                    token_acc = (token_acc + scale).min(1.0);
+                    if token_acc < 1.0 { continue; }
+                    token_acc -= 1.0;
+                }
 
                 let permit = match Arc::clone(&sem).try_acquire_owned() {
                     Ok(p) => p,

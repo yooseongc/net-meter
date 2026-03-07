@@ -10,6 +10,8 @@ use net_meter_ns::NamespaceManager;
 use net_meter_responder::Responder;
 use tracing::{error, info};
 
+use crate::event::TestEvent;
+
 use crate::result::TestResult;
 use crate::state::AppState;
 
@@ -68,6 +70,11 @@ impl Orchestrator {
             use_namespace = config.ns_config.use_namespace,
             "Starting test"
         );
+        let _ = state.event_tx.send(TestEvent::TestStarted {
+            config_name: config.name.clone(),
+            test_type: format!("{:?}", config.test_type).to_lowercase(),
+            duration_secs: config.duration_secs,
+        });
 
         if config.ns_config.use_namespace {
             match self
@@ -158,6 +165,7 @@ impl Orchestrator {
 
         let mut ns = NamespaceManager::new(&config.ns_config.netns_prefix);
         ns.setup().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let _ = state.event_tx.send(TestEvent::NsSetupComplete);
 
         // 서버 IP 할당 + server NS에 alias 추가
         let (pair_addrs, server_binds) = ns
@@ -222,7 +230,26 @@ impl Orchestrator {
 
     /// Running 상태로 전환하고 duration 기반 자동 종료를 등록한다.
     async fn transition_to_running(&self, config: TestConfig, state: Arc<AppState>) {
-        *state.test_state.write().await = TestState::Running;
+        let ramp_up_secs = config.default_load.ramp_up_secs;
+
+        if ramp_up_secs > 0 {
+            *state.test_state.write().await = TestState::RampingUp;
+            info!(ramp_up_secs, "Ramp-up phase starting");
+            let _ = state.event_tx.send(TestEvent::RampUpStarted { ramp_up_secs });
+
+            let state_clone = Arc::clone(&state);
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(ramp_up_secs)).await;
+                if *state_clone.test_state.read().await == TestState::RampingUp {
+                    *state_clone.test_state.write().await = TestState::Running;
+                    info!("Ramp-up complete, running at full speed");
+                    let _ = state_clone.event_tx.send(TestEvent::RampUpComplete);
+                }
+            });
+        } else {
+            *state.test_state.write().await = TestState::Running;
+        }
+
         info!("Test is running");
 
         if config.duration_secs > 0 {
@@ -231,7 +258,7 @@ impl Orchestrator {
             tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(duration)).await;
                 let current = *state_clone.test_state.read().await;
-                if current == TestState::Running {
+                if current == TestState::Running || current == TestState::RampingUp {
                     info!("Test duration elapsed, stopping automatically");
                     let mut orch = state_clone.orchestrator.lock().await;
                     orch.stop(Arc::clone(&state_clone)).await;
@@ -255,6 +282,7 @@ impl Orchestrator {
 
         if let Some(mut ns) = self.ns_manager.take() {
             ns.teardown().await;
+            let _ = state.event_tx.send(TestEvent::NsTeardownComplete);
         }
 
         // MultiAggregator 프로토콜 컬렉터 정리
@@ -296,6 +324,7 @@ impl Orchestrator {
         *state.test_start_time.write().await = None;
         *state.test_state.write().await = TestState::Completed;
         info!("Test completed");
+        let _ = state.event_tx.send(TestEvent::TestStopped { reason: "completed".to_string() });
     }
 }
 

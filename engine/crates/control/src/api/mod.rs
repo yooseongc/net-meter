@@ -1,3 +1,4 @@
+pub mod events;
 pub mod health;
 pub mod metrics;
 pub mod profiles;
@@ -50,4 +51,5 @@ fn api_routes() -> Router<Arc<AppState>> {
         .merge(metrics::routes())
         .merge(profiles::routes())
         .merge(results::routes())
+        .merge(events::routes())
 }

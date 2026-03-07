@@ -1,6 +1,7 @@
 import { useTestStore } from '../store/testStore'
 import TestControl from './TestControl'
 import MetricsPanel from './MetricsPanel'
+import EventLog from './EventLog'
 
 export default function Dashboard() {
   const { error } = useTestStore()
@@ -17,6 +18,8 @@ export default function Dashboard() {
         <TestControl />
         <MetricsPanel />
       </div>
+
+      <EventLog />
     </div>
   )
 }

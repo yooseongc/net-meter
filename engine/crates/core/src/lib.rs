@@ -5,7 +5,7 @@ pub mod state;
 
 pub use config::{
     ClientEndpoint, HttpMethod, HttpPayload, LoadConfig, NsConfig, PairConfig, PayloadProfile,
-    Protocol, ServerEndpoint, TcpPayload, TestConfig, TestType,
+    Protocol, ServerEndpoint, TcpPayload, TestConfig, TestType, Thresholds,
 };
 pub use error::NetMeterError;
 pub use snapshot::{HistogramBucket, MetricsSnapshot, PerProtocolSnapshot};

@@ -155,6 +155,9 @@ pub struct LoadConfig {
     /// 응답 완료 타임아웃 (ms). None이면 30000.
     #[serde(default)]
     pub response_timeout_ms: Option<u64>,
+    /// 목표 CPS/CC까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.
+    #[serde(default)]
+    pub ramp_up_secs: u64,
 }
 
 impl Default for LoadConfig {
@@ -165,8 +168,30 @@ impl Default for LoadConfig {
             max_inflight: None,
             connect_timeout_ms: Some(5000),
             response_timeout_ms: Some(30000),
+            ramp_up_secs: 0,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 임계값 / 알람 설정
+// ---------------------------------------------------------------------------
+
+/// 시험 Pass/Fail 임계값. 위반 시 대시보드 경고 또는 자동 중단.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Thresholds {
+    /// 최소 CPS 기준 (이 값 미만이면 위반)
+    #[serde(default)]
+    pub min_cps: Option<f64>,
+    /// 최대 에러율 % 기준 (connections_failed / connections_attempted × 100)
+    #[serde(default)]
+    pub max_error_rate_pct: Option<f64>,
+    /// 최대 latency p99 (ms) 기준
+    #[serde(default)]
+    pub max_latency_p99_ms: Option<f64>,
+    /// 위반 감지 시 시험 자동 중단
+    #[serde(default)]
+    pub auto_stop_on_fail: bool,
 }
 
 impl LoadConfig {
@@ -295,6 +320,9 @@ pub struct TestConfig {
     pub pairs: Vec<PairConfig>,
     /// 네트워크/NS 설정
     pub ns_config: NsConfig,
+    /// 임계값 / 알람 설정 (선택)
+    #[serde(default)]
+    pub thresholds: Thresholds,
 }
 
 impl TestConfig {
@@ -316,6 +344,7 @@ impl TestConfig {
             default_load: LoadConfig::default(),
             pairs: vec![pair],
             ns_config: NsConfig::default(),
+            thresholds: Thresholds::default(),
         }
     }
 

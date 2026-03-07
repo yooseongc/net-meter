@@ -8,7 +8,9 @@ pub enum TestState {
     Idle,
     /// 준비 중 (namespace 생성, 서버 기동 등)
     Preparing,
-    /// 시험 진행 중
+    /// Ramp-up 진행 중 (목표 부하까지 선형 증가)
+    RampingUp,
+    /// 시험 진행 중 (전속력)
     Running,
     /// 중지 요청됨 (정리 중)
     Stopping,
@@ -29,6 +31,7 @@ impl std::fmt::Display for TestState {
         let s = match self {
             Self::Idle => "idle",
             Self::Preparing => "preparing",
+            Self::RampingUp => "ramping_up",
             Self::Running => "running",
             Self::Stopping => "stopping",
             Self::Completed => "completed",

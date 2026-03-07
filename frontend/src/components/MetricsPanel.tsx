@@ -215,6 +215,33 @@ function ErrorBreakdown({ snap }: { snap: MetricsSnapshot }) {
   )
 }
 
+// 상태코드 상세 breakdown
+function StatusCodeTable({ snap }: { snap: MetricsSnapshot }) {
+  const breakdown = snap.status_code_breakdown ?? {}
+  const entries = Object.entries(breakdown)
+    .map(([code, count]) => ({ code: Number(code), count: count as number }))
+    .sort((a, b) => a.code - b.code)
+
+  if (entries.length === 0) return null
+
+  return (
+    <div className="card">
+      <div className="card-title">Status Code Breakdown</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: 6 }}>
+        {entries.map(({ code, count }) => {
+          const color = code < 300 ? '#3fb950' : code < 400 ? '#58a6ff' : code < 500 ? '#d29922' : '#f85149'
+          return (
+            <div key={code} style={{ background: '#0d1117', borderRadius: 6, padding: '6px 10px' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color, fontFamily: 'monospace' }}>{code}</div>
+              <div style={{ fontSize: 12, color: '#8b949e' }}>{count.toLocaleString()}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── 메인 컴포넌트 ────────────────────────────────────────────────────────────
 
 export default function MetricsPanel() {
@@ -245,8 +272,36 @@ export default function MetricsPanel() {
   const targetCc = profile?.default_load.target_cc
   const succ = successRate(snap)
 
+  const violations = snap.threshold_violations ?? []
+  const isRampingUp = snap.is_ramping_up ?? false
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+      {/* Ramp-up 배너 */}
+      {isRampingUp && (
+        <div style={{
+          background: 'rgba(188,140,255,0.1)', border: '1px solid #bc8cff',
+          borderRadius: 8, padding: '8px 14px', fontSize: 13, color: '#bc8cff',
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ fontWeight: 700 }}>↑ Ramping Up</span>
+          <span style={{ color: '#8b949e' }}>— linearly scaling to target load</span>
+        </div>
+      )}
+
+      {/* 임계값 위반 배너 */}
+      {violations.length > 0 && (
+        <div style={{
+          background: 'rgba(248,81,73,0.1)', border: '1px solid #f85149',
+          borderRadius: 8, padding: '8px 14px', fontSize: 13,
+        }}>
+          <div style={{ fontWeight: 700, color: '#f85149', marginBottom: 4 }}>⚠ Threshold Violation</div>
+          {violations.map((v, i) => (
+            <div key={i} style={{ color: '#e6ac3a', fontSize: 12 }}>• {v}</div>
+          ))}
+        </div>
+      )}
 
       {/* 핵심 목표 지표 카드 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
@@ -410,6 +465,9 @@ export default function MetricsPanel() {
         <LatencyHistogram snap={snap} />
         <ErrorBreakdown snap={snap} />
       </div>
+
+      {/* 상태코드 상세 breakdown (HTTP pair가 있을 때만 표시) */}
+      <StatusCodeTable snap={snap} />
 
     </div>
   )

@@ -255,6 +255,60 @@ npm run build → ✓ built in 2.16s
 
 ---
 
+## P1 개선: 임계값/알람 + Ramp-up + 이벤트 로그 + 상태코드 Breakdown ✅
+
+**목표:** 운용 수준 모니터링 기능 완성
+
+**달성 사항:**
+
+### 1. 임계값 / 알람 설정
+- [x] **`Thresholds`** 구조체 추가 (`core/src/config.rs`):
+  - `min_cps`, `max_error_rate_pct`, `max_latency_p99_ms`, `auto_stop_on_fail`
+- [x] **`TestConfig.thresholds`** 필드 추가 (`#[serde(default)]`)
+- [x] 1초 집계 루프(`main.rs`)에서 임계값 체크 → `MetricsSnapshot.threshold_violations` 설정
+- [x] `auto_stop_on_fail=true`이면 엔진 자동 중단
+- [x] **프론트엔드**: TestControl에 Thresholds 섹션 추가 (min_cps, max_error_rate, max_latency_p99, auto_stop 체크박스)
+- [x] MetricsPanel 상단에 위반 배너 (빨간 테두리, 위반 항목 목록)
+- [x] App.tsx 헤더에 ⚠ 알람 배지 (위반 시 점등)
+
+### 2. Ramp-up 제어
+- [x] **`LoadConfig.ramp_up_secs: u64`** 추가 (기본값 0)
+- [x] **`TestState::RampingUp`** 추가 (보라색 배지)
+- [x] **Orchestrator** `transition_to_running()`:
+  - `ramp_up_secs > 0`이면 `RampingUp` 상태로 시작, 이후 `Running`으로 전환
+  - `duration_secs` 타이머는 `RampingUp`도 포함하여 카운트
+- [x] **Generator CPS 루프**: 토큰 버킷 방식으로 선형 증가
+  - `token_acc += scale.min(1.0)` → 누적 ≥ 1이면 연결 허용
+  - HTTP/1.1, HTTP/2, TCP 모두 적용
+- [x] **프론트엔드**: Default Load 섹션에 "Ramp-up" 입력 추가
+- [x] MetricsPanel 상단 Ramp-up 진행 배너 (보라색)
+- [x] `StateBadge`에 `ramping_up` 색상 추가
+
+### 3. 실시간 이벤트 로그 패널 (SSE)
+- [x] **`control/src/event.rs`** (신규): `TestEvent` enum 정의
+  - `TestStarted`, `TestStopped`, `RampUpStarted`, `RampUpComplete`, `NsSetupComplete`, `NsTeardownComplete`, `ThresholdViolation`, `Error`
+- [x] **`AppState.event_tx: broadcast::Sender<TestEvent>`** 추가
+- [x] **`GET /api/events/stream`** SSE 엔드포인트 (`api/events.rs`) — `async_stream` 사용
+- [x] Orchestrator에서 이벤트 발행 (시험 시작/중지, NS 준비/정리, Ramp-up 단계)
+- [x] **프론트엔드**: `EventLog.tsx` 신규 컴포넌트
+  - 최근 100개 항목, 레벨별 색상 (info/warn/error)
+  - Dashboard 하단에 배치 (이벤트가 있을 때만 표시)
+  - "Clear" 버튼
+
+### 4. 상태코드 상세 Breakdown
+- [x] **`Collector.status_code_breakdown: Mutex<HashMap<u16, u64>>`** 추가
+- [x] `record_response()`에서 per-code 집계 (`status > 0`인 경우만)
+- [x] `MetricsSnapshot.status_code_breakdown: HashMap<u16, u64>` 추가
+- [x] **프론트엔드**: `StatusCodeTable` 컴포넌트 — 코드별 응답 수 그리드 표시
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 0.08s
+npm run build → ✓ built in 2.11s
+```
+
+---
+
 ## Phase 8: TLS 지원 (예정)
 
 **목표:** 자체 서명 인증서로 TLS 1.2/1.3 시험

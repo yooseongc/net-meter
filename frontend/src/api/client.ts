@@ -6,6 +6,7 @@ export type HttpMethod = 'GET' | 'POST'
 export type TestState =
   | 'idle'
   | 'preparing'
+  | 'ramping_up'
   | 'running'
   | 'stopping'
   | 'completed'
@@ -43,6 +44,14 @@ export interface LoadConfig {
   max_inflight?: number
   connect_timeout_ms?: number
   response_timeout_ms?: number
+  ramp_up_secs?: number
+}
+
+export interface Thresholds {
+  min_cps?: number
+  max_error_rate_pct?: number
+  max_latency_p99_ms?: number
+  auto_stop_on_fail?: boolean
 }
 
 export interface ClientEndpoint {
@@ -83,6 +92,7 @@ export interface TestConfig {
   default_load: LoadConfig
   pairs: PairConfig[]
   ns_config: NsConfig
+  thresholds?: Thresholds
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +153,9 @@ export interface MetricsSnapshot {
   server_bytes_tx: number
   latency_histogram: HistogramBucket[]
   by_protocol: Record<string, PerProtocolSnapshot>
+  status_code_breakdown: Record<number, number>
+  threshold_violations: string[]
+  is_ramping_up: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +217,38 @@ export const api = {
   listResults: () => fetchJson<TestResult[]>('/results'),
   deleteResult: (id: string) =>
     fetch(`${BASE}/results/${id}`, { method: 'DELETE' }),
+}
+
+// ---------------------------------------------------------------------------
+// SSE 이벤트 타입
+// ---------------------------------------------------------------------------
+
+export type TestEventType =
+  | { type: 'test_started'; config_name: string; test_type: string; duration_secs: number }
+  | { type: 'test_stopped'; reason: string }
+  | { type: 'ramp_up_started'; ramp_up_secs: number }
+  | { type: 'ramp_up_complete' }
+  | { type: 'ns_setup_complete' }
+  | { type: 'ns_teardown_complete' }
+  | { type: 'threshold_violation'; violations: string[] }
+  | { type: 'error'; message: string }
+
+/// SSE 이벤트 스트림 구독 (EventSource)
+export function connectEventStream(
+  onEvent: (event: TestEventType) => void,
+  onError?: () => void,
+): EventSource {
+  const es = new EventSource('/api/events/stream')
+  es.onmessage = (ev) => {
+    try {
+      const event = JSON.parse(ev.data) as TestEventType
+      onEvent(event)
+    } catch {
+      /* ignore */
+    }
+  }
+  es.onerror = () => onError?.()
+  return es
 }
 
 /// WebSocket 연결로 실시간 메트릭 스트림 구독

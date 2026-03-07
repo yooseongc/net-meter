@@ -1,4 +1,5 @@
 mod api;
+mod event;
 mod orchestrator;
 mod result;
 mod state;
@@ -8,11 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use net_meter_core::{MetricsSnapshot, TestState, Thresholds};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::time::{interval, Duration};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+use crate::event::TestEvent;
 
 #[derive(Parser)]
 #[command(name = "net-meter", about = "Network performance measurement tool")]
@@ -67,18 +71,38 @@ async fn main() -> anyhow::Result<()> {
 
     let state = state::AppState::new();
 
-    // 백그라운드: 1초 간격으로 메트릭 집계 및 브로드캐스트
+    // 백그라운드: 1초 간격으로 메트릭 집계, 임계값 체크, 브로드캐스트
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(1));
         loop {
             ticker.tick().await;
-            let snapshot = {
+            let mut snapshot = {
                 let mut agg = state_clone.aggregator.lock().await;
                 agg.tick()
             };
+
+            // 시험 상태 및 임계값 체크
+            let test_state = *state_clone.test_state.read().await;
+            snapshot.is_ramping_up = test_state == TestState::RampingUp;
+
+            if test_state == TestState::Running || test_state == TestState::RampingUp {
+                if let Some(ref config) = *state_clone.active_config.read().await {
+                    let violations = check_thresholds(&snapshot, &config.thresholds);
+                    if !violations.is_empty() {
+                        snapshot.threshold_violations = violations.clone();
+                        let _ = state_clone.event_tx.send(TestEvent::ThresholdViolation {
+                            violations: violations.clone(),
+                        });
+                        if config.thresholds.auto_stop_on_fail {
+                            let mut orch = state_clone.orchestrator.lock().await;
+                            orch.stop(Arc::clone(&state_clone)).await;
+                        }
+                    }
+                }
+            }
+
             *state_clone.latest_snapshot.write().await = snapshot.clone();
-            // 구독자가 없어도 오류 무시
             let _ = state_clone.snapshot_tx.send(snapshot);
         }
     });
@@ -91,6 +115,39 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// 임계값 위반 항목 목록 반환 (빈 배열이면 정상)
+fn check_thresholds(snap: &MetricsSnapshot, t: &Thresholds) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if let Some(min) = t.min_cps {
+        // 시험 시작 직후 (CPS == 0)는 false positive 방지를 위해 건너뜀
+        if snap.cps > 0.0 && snap.cps < min {
+            v.push(format!("CPS {:.1} < min {:.1}", snap.cps, min));
+        }
+    }
+
+    let attempted = snap.connections_attempted;
+    if attempted > 0 {
+        let err_pct = snap.connections_failed as f64 / attempted as f64 * 100.0;
+        if let Some(max_err) = t.max_error_rate_pct {
+            if err_pct > max_err {
+                v.push(format!("Error rate {:.1}% > max {:.1}%", err_pct, max_err));
+            }
+        }
+    }
+
+    if let Some(max_p99) = t.max_latency_p99_ms {
+        if snap.latency_p99_ms > 0.0 && snap.latency_p99_ms > max_p99 {
+            v.push(format!(
+                "Latency p99 {:.1}ms > {:.1}ms",
+                snap.latency_p99_ms, max_p99
+            ));
+        }
+    }
+
+    v
 }
 
 /// SO_REUSEADDR + SO_REUSEPORT를 설정한 TcpListener를 반환한다.

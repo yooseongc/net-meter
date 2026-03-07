@@ -36,8 +36,12 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
     useTestStore()
 
   const isRunning =
-    testState === 'running' || testState === 'preparing' || testState === 'stopping'
+    testState === 'running' || testState === 'preparing' || testState === 'stopping' || testState === 'ramping_up'
   const isIdle = testState === 'idle' || testState === 'completed' || testState === 'failed'
+
+  const { latestSnapshot, eventLog } = useTestStore()
+  const hasViolations = (latestSnapshot?.threshold_violations?.length ?? 0) > 0
+  const unreadWarnings = eventLog.filter(e => e.level === 'warn' || e.level === 'error').length
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -113,6 +117,29 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
           </button>
         )}
 
+        {/* 임계값 위반 알람 */}
+        {hasViolations && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 5, fontSize: 11,
+            background: '#2d1515', border: '1px solid #f85149', borderRadius: 6,
+            padding: '3px 8px', color: '#f85149', fontWeight: 700,
+            animation: 'pulse 1.5s ease-in-out infinite',
+          }}>
+            ⚠ Threshold Violation
+          </div>
+        )}
+
+        {/* 이벤트 경고 카운트 */}
+        {unreadWarnings > 0 && !hasViolations && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+            background: '#2d2015', border: '1px solid #d29922', borderRadius: 6,
+            padding: '3px 8px', color: '#d29922',
+          }}>
+            ⚠ {unreadWarnings}
+          </div>
+        )}
+
         {/* WS 연결 상태 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
           <div
@@ -134,6 +161,7 @@ function StateBadge({ state }: { state: string }) {
   const colors: Record<string, string> = {
     idle: '#8b949e',
     preparing: '#d29922',
+    ramping_up: '#bc8cff',
     running: '#3fb950',
     stopping: '#d29922',
     completed: '#58a6ff',

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import {
   TestConfig, TestType, Protocol, HttpMethod,
   PairConfig, PayloadProfile, LoadConfig, NsConfig,
-  TcpPayload, HttpPayload,
+  TcpPayload, HttpPayload, Thresholds,
 } from '../api/client'
 import { useTestStore } from '../store/testStore'
 import { v4 as uuidv4 } from 'uuid'
@@ -35,9 +35,10 @@ const defaultConfig = (): TestConfig => ({
   name: 'New Test',
   test_type: 'cps',
   duration_secs: 30,
-  default_load: { target_cps: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000 },
+  default_load: { target_cps: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
   pairs: [defaultPair(0)],
   ns_config: { use_namespace: false, netns_prefix: 'nm', tcp_quickack: false },
+  thresholds: {},
 })
 
 // ---------------------------------------------------------------------------
@@ -278,6 +279,11 @@ export default function TestControl() {
   const setNsField = <K extends keyof NsConfig>(key: K, val: NsConfig[K]) =>
     setConfig((prev) => ({ ...prev, ns_config: { ...prev.ns_config, [key]: val } }))
 
+  const setThresholdField = (key: keyof Thresholds, raw: string | boolean) => {
+    const val = typeof raw === 'boolean' ? raw : (raw === '' ? undefined : Number(raw))
+    setConfig((prev) => ({ ...prev, thresholds: { ...prev.thresholds, [key]: val } }))
+  }
+
   // Pairs
   const handleAddPair = () => {
     const newPair = defaultPair(config.pairs.length)
@@ -418,6 +424,42 @@ export default function TestControl() {
               placeholder="auto"
               onChange={(e) => setLoadField('max_inflight', e.target.value)} />
           </Field>
+          <Field label="Ramp-up" unit="sec (0=off)">
+            <input type="number" value={config.default_load.ramp_up_secs ?? 0}
+              min={0}
+              onChange={(e) => setLoadField('ramp_up_secs', e.target.value)} />
+          </Field>
+        </Section>
+
+        {/* THRESHOLDS */}
+        <Section title="Thresholds / Alarm" defaultOpen={false}>
+          <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
+            임계값 초과 시 대시보드에 경고가 표시됩니다. auto_stop 활성화 시 시험을 자동 중단합니다.
+          </div>
+          <Row>
+            <Field label="Min CPS" unit="/s (blank=off)">
+              <input type="number" value={config.thresholds?.min_cps ?? ''}
+                placeholder="none"
+                onChange={(e) => setThresholdField('min_cps', e.target.value)} />
+            </Field>
+            <Field label="Max Error Rate" unit="% (blank=off)">
+              <input type="number" value={config.thresholds?.max_error_rate_pct ?? ''}
+                placeholder="none"
+                onChange={(e) => setThresholdField('max_error_rate_pct', e.target.value)} />
+            </Field>
+          </Row>
+          <Field label="Max Latency p99" unit="ms (blank=off)">
+            <input type="number" value={config.thresholds?.max_latency_p99_ms ?? ''}
+              placeholder="none"
+              onChange={(e) => setThresholdField('max_latency_p99_ms', e.target.value)} />
+          </Field>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <input type="checkbox"
+              checked={config.thresholds?.auto_stop_on_fail ?? false}
+              onChange={(e) => setThresholdField('auto_stop_on_fail', e.target.checked)}
+              style={{ width: 'auto' }} />
+            Auto-stop on violation
+          </label>
         </Section>
 
         {/* NS CONFIG */}

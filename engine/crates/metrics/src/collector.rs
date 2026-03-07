@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +52,9 @@ pub struct Collector {
     pub connect_hist: Mutex<Histogram<u64>>,
     /// Time To First Byte (request sent → first response byte)
     pub ttfb_hist: Mutex<Histogram<u64>>,
+
+    /// HTTP 상태코드별 응답 수 (per-code breakdown)
+    pub status_code_breakdown: Mutex<HashMap<u16, u64>>,
 }
 
 impl Collector {
@@ -74,6 +78,7 @@ impl Collector {
             latency_hist: Mutex::new(new_hist()),
             connect_hist: Mutex::new(new_hist()),
             ttfb_hist: Mutex::new(new_hist()),
+            status_code_breakdown: Mutex::new(HashMap::new()),
         })
     }
 
@@ -149,6 +154,12 @@ impl Collector {
             _ => self.status_other.fetch_add(1, Ordering::Relaxed),
         };
 
+        if status > 0 {
+            if let Ok(mut map) = self.status_code_breakdown.lock() {
+                *map.entry(status).or_insert(0) += 1;
+            }
+        }
+
         if let Ok(mut h) = self.latency_hist.lock() {
             let _ = h.record(latency_us.max(1));
         }
@@ -189,12 +200,20 @@ impl Collector {
             ttfb_mean_ms: ttfb_mean,
             ttfb_p99_ms: ttfb_p99,
             latency_histogram,
+            status_code_breakdown: self
+                .status_code_breakdown
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default(),
             // 율(rate)은 Aggregator가 채움
             cps: 0.0,
             rps: 0.0,
             bytes_tx_per_sec: 0.0,
             bytes_rx_per_sec: 0.0,
             by_protocol: std::collections::HashMap::new(),
+            // 임계값/ramp-up은 main 루프에서 채움
+            threshold_violations: Vec::new(),
+            is_ramping_up: false,
         }
     }
 
@@ -227,6 +246,9 @@ impl Collector {
         }
         if let Ok(mut h) = self.ttfb_hist.lock() {
             h.reset();
+        }
+        if let Ok(mut m) = self.status_code_breakdown.lock() {
+            m.clear();
         }
     }
 }

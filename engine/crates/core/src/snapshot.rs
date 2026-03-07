@@ -88,4 +88,18 @@ pub struct MetricsSnapshot {
     /// 키: "tcp", "http1", "http2"
     #[serde(default)]
     pub by_protocol: HashMap<String, PerProtocolSnapshot>,
+
+    // --- HTTP 상태코드 분포 (HTTP pair만 해당) ---
+    /// 상태코드 → 누적 응답 수 (예: {200: 5000, 404: 3})
+    #[serde(default)]
+    pub status_code_breakdown: HashMap<u16, u64>,
+
+    // --- 임계값 위반 ---
+    /// 현재 시점에 위반된 임계값 항목 목록 (빈 배열이면 정상)
+    #[serde(default)]
+    pub threshold_violations: Vec<String>,
+
+    // --- Ramp-up 진행 여부 ---
+    #[serde(default)]
+    pub is_ramping_up: bool,
 }
