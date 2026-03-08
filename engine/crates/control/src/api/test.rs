@@ -22,6 +22,9 @@ struct TestStatus {
     state: TestState,
     config: Option<TestConfig>,
     elapsed_secs: Option<u64>,
+    network_mode: String,
+    upper_iface: String,
+    lower_iface: String,
 }
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> {
@@ -33,7 +36,20 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> 
         .await
         .map(|t| t.elapsed().as_secs());
 
-    Json(TestStatus { state: test_state, config, elapsed_secs })
+    let network_mode = match state.server_net.mode {
+        net_meter_core::NetworkMode::Loopback => "loopback",
+        net_meter_core::NetworkMode::Namespace => "namespace",
+        net_meter_core::NetworkMode::ExternalPort => "external_port",
+    }.to_string();
+
+    Json(TestStatus {
+        state: test_state,
+        config,
+        elapsed_secs,
+        network_mode,
+        upper_iface: state.server_net.upper_iface.clone(),
+        lower_iface: state.server_net.lower_iface.clone(),
+    })
 }
 
 async fn start_handler(

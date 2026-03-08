@@ -22,6 +22,10 @@ pub enum TestEvent {
     NsSetupComplete,
     /// NS 환경 정리 완료
     NsTeardownComplete,
+    /// External Port 설정 완료
+    ExtPortSetupComplete,
+    /// External Port 정리 완료
+    ExtPortTeardownComplete,
     /// 임계값 위반 감지
     ThresholdViolation { violations: Vec<String> },
     /// 오류

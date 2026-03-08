@@ -45,8 +45,18 @@ impl Generator {
         tls_client_config: Option<Arc<ClientConfig>>,
         client_ips: &HashMap<String, Vec<String>>,
     ) {
+        // 기본 부하(default_load)를 사용하는 association 수 계산:
+        // num_connections는 "전체 총량"이므로 association 수로 나누어 per-association 값을 구한다.
+        let default_assoc_count = config
+            .associations
+            .iter()
+            .filter(|a| a.load.is_none())
+            .count()
+            .max(1);
+
         info!(
             associations = config.associations.len(),
+            default_assoc_count,
             test_type = ?config.test_type,
             use_ns = client_ns.is_some(),
             "Generator starting all association workers"
@@ -64,12 +74,9 @@ impl Generator {
                 }
             };
 
-            let client_def = match client_map.get(&assoc.client_id) {
-                Some(c) => c.clone(),
-                None => {
-                    error!(assoc_id = %assoc.id, client_id = %assoc.client_id, "No ClientDef found, skipping");
-                    continue;
-                }
+            if client_map.get(&assoc.client_id).is_none() {
+                error!(assoc_id = %assoc.id, client_id = %assoc.client_id, "No ClientDef found, skipping");
+                continue;
             };
 
             let addr = match pair_addrs.get(&assoc.id) {
@@ -81,7 +88,16 @@ impl Generator {
             };
 
             let protocol = server_def.protocol;
-            let load = assoc.effective_load(&config.default_load).clone();
+
+            // Per-association load: default_load 사용 시 총량을 association 수로 나눔
+            let load = if assoc.load.is_none() {
+                let total = config.default_load.effective_num_connections();
+                let per_assoc = (total / default_assoc_count as u64).max(1);
+                config.default_load.clone().with_num_connections(per_assoc)
+            } else {
+                assoc.load.clone().unwrap()
+            };
+
             let payload = assoc.payload.clone();
             let test_type = config.test_type;
             let duration_secs = config.duration_secs;
@@ -91,17 +107,19 @@ impl Generator {
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
-            // 워커 수 결정: per-client IP 목록이 있으면 그 수, 없으면 client_def.effective_count()
+            // 워커 수 결정
+            // - NS 모드: 할당된 client IP 수 (각 IP = 1 워커)
+            // - 로컬 모드: per-assoc 연결 수 (각 워커 = 독립 연결 루프 1개)
             let ip_list = client_ips.get(&assoc.id).cloned().unwrap_or_default();
             let worker_count = if !ip_list.is_empty() {
                 ip_list.len()
             } else {
-                client_def.effective_count() as usize
+                load.effective_num_connections() as usize
             };
 
-            // P3: 총 연결 수를 워커 수로 자동 분배 (ceiling division, 최소 1)
+            // 총 연결 수를 워커 수로 분배 (ceiling division, 최소 1)
             let per_worker_conns = load.connections_per_worker(worker_count);
-            let worker_load = load.clone().with_num_connections(per_worker_conns);
+            let worker_load = load.with_num_connections(per_worker_conns);
 
             // server_def.tls가 true이고 TLS config가 있을 때만 TLS 사용
             let assoc_tls = if server_def.tls { tls_client_config.clone() } else { None };

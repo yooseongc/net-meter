@@ -60,6 +60,9 @@ interface TestStore {
   error: string | null
   eventLog: EventLogEntry[]
   draftConfig: TestConfig | null
+  networkMode: string
+  upperIface: string
+  lowerIface: string
 
   fetchStatus: () => Promise<void>
   startTest: (config: TestConfig) => Promise<void>
@@ -97,10 +100,18 @@ function eventToEntry(ev: TestEventType): EventLogEntry {
       return makeEntry('info', `Ramp-up started — ${ev.ramp_up_secs}s to full speed`)
     case 'ramp_up_complete':
       return makeEntry('info', 'Ramp-up complete — running at full speed')
+    case 'ramp_down_started':
+      return makeEntry('info', `Ramp-down started — ${ev.ramp_down_secs}s to stop`)
+    case 'ramp_down_complete':
+      return makeEntry('info', 'Ramp-down complete')
     case 'ns_setup_complete':
       return makeEntry('info', 'Network namespace setup complete')
     case 'ns_teardown_complete':
       return makeEntry('info', 'Network namespace teardown complete')
+    case 'ext_port_setup_complete':
+      return makeEntry('info', 'External port setup complete')
+    case 'ext_port_teardown_complete':
+      return makeEntry('info', 'External port teardown complete')
     case 'threshold_violation':
       return makeEntry('warn', `Threshold violation: ${ev.violations.join('; ')}`)
     case 'error':
@@ -120,6 +131,9 @@ export const useTestStore = create<TestStore>((set, get) => ({
   error: null,
   eventLog: [],
   draftConfig: null,
+  networkMode: 'loopback',
+  upperIface: 'veth-c0',
+  lowerIface: 'veth-s0',
 
   fetchStatus: async () => {
     try {
@@ -131,6 +145,9 @@ export const useTestStore = create<TestStore>((set, get) => ({
         testState: newState,
         activeProfile: status.config,
         elapsedSecs: status.elapsed_secs,
+        networkMode: status.network_mode ?? 'loopback',
+        upperIface: status.upper_iface ?? 'veth-c0',
+        lowerIface: status.lower_iface ?? 'veth-s0',
         error: null,
       })
 

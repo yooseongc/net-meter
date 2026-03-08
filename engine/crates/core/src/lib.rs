@@ -4,8 +4,8 @@ pub mod snapshot;
 pub mod state;
 
 pub use config::{
-    Association, ClientDef, ExternalPortOptions, HttpMethod, HttpPayload, LoadConfig,
-    NetworkConfig, NetworkMode, NsOptions, PayloadProfile, Protocol, ServerDef, TcpPayload,
+    Association, ClientDef, HttpMethod, HttpPayload, LoadConfig,
+    NetworkConfig, NetworkMode, PayloadProfile, Protocol, ServerDef, TcpPayload,
     TestConfig, TestType, Thresholds, VlanConfig, VlanProto,
 };
 pub use error::NetMeterError;

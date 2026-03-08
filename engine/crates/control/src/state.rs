@@ -2,19 +2,45 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use net_meter_core::{MetricsSnapshot, Protocol, TestConfig, TestState};
+use net_meter_core::{MetricsSnapshot, NetworkMode, Protocol, TestConfig, TestState};
 use net_meter_metrics::{Collector, MultiAggregator};
+use net_meter_ns::{ExternalPortState, NamespaceManager};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::event::TestEvent;
-
 use crate::result::TestResult;
+
+/// 서버 시작 시 CLI 옵션으로 결정되는 네트워크 설정 (불변).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ServerNetConfig {
+    pub mode: NetworkMode,
+    pub upper_iface: String,
+    pub lower_iface: String,
+    pub mtu: u16,
+    pub ns_prefix: String,
+}
+
+impl Default for ServerNetConfig {
+    fn default() -> Self {
+        Self {
+            mode: NetworkMode::Loopback,
+            upper_iface: "veth-c0".to_string(),
+            lower_iface: "veth-s0".to_string(),
+            mtu: 1500,
+            ns_prefix: "nm".to_string(),
+        }
+    }
+}
 
 /// 전역 애플리케이션 상태.
 ///
 /// Arc로 모든 핸들러에 공유된다.
 /// 각 필드는 독립적으로 잠금된다 (giant mutex 금지).
 pub struct AppState {
+    /// 서버 네트워크 모드 (CLI로 결정, 불변)
+    pub server_net: ServerNetConfig,
+
     /// 현재 시험 상태
     pub test_state: RwLock<TestState>,
 
@@ -50,16 +76,23 @@ pub struct AppState {
 
     /// 완료된 시험 결과 목록 (최신 순)
     pub test_results: RwLock<Vec<TestResult>>,
+
+    /// Namespace 모드: 프로그램 시작 시 생성, 종료 시 teardown
+    pub ns_manager: Mutex<Option<NamespaceManager>>,
+
+    /// External Port 모드: 프로그램 시작 시 설정, 종료 시 복원
+    pub ext_port_state: Mutex<Option<ExternalPortState>>,
 }
 
 impl AppState {
-    pub fn new() -> Arc<Self> {
+    pub fn new(server_net: ServerNetConfig) -> Arc<Self> {
         let global_metrics = Collector::new();
         let aggregator = MultiAggregator::new(Arc::clone(&global_metrics));
         let (snapshot_tx, _) = broadcast::channel(64);
         let (event_tx, _) = broadcast::channel(256);
 
         Arc::new(Self {
+            server_net,
             test_state: RwLock::new(TestState::Idle),
             active_config: RwLock::new(None),
             saved_configs: RwLock::new(HashMap::new()),
@@ -72,6 +105,8 @@ impl AppState {
             orchestrator: Mutex::new(crate::orchestrator::Orchestrator::new()),
             test_start_time: RwLock::new(None),
             test_results: RwLock::new(Vec::new()),
+            ns_manager: Mutex::new(None),
+            ext_port_state: Mutex::new(None),
         })
     }
 }

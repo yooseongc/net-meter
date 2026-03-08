@@ -117,26 +117,8 @@ export interface Association {
 // 네트워크 설정
 // ---------------------------------------------------------------------------
 
-export interface NsOptions {
-  netns_prefix: string
-}
-
-export interface ExternalPortOptions {
-  client_iface: string
-  server_iface: string
-  client_gateway?: string
-  client_gateway_mac?: string
-  server_gateway?: string
-  server_gateway_mac?: string
-  flush_iface_addrs?: boolean
-  cleanup_addrs?: boolean
-}
-
 export interface NetworkConfig {
-  mode: NetworkMode
-  ns: NsOptions
-  ext?: ExternalPortOptions
-  tcp_quickack: boolean
+  tcp_quickack?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +210,9 @@ export interface TestStatus {
   state: TestState
   config: TestConfig | null
   elapsed_secs: number | null
+  network_mode: string
+  upper_iface: string
+  lower_iface: string
 }
 
 export interface TestResult {
@@ -290,8 +275,12 @@ export type TestEventType =
   | { type: 'test_stopped'; reason: string }
   | { type: 'ramp_up_started'; ramp_up_secs: number }
   | { type: 'ramp_up_complete' }
+  | { type: 'ramp_down_started'; ramp_down_secs: number }
+  | { type: 'ramp_down_complete' }
   | { type: 'ns_setup_complete' }
   | { type: 'ns_teardown_complete' }
+  | { type: 'ext_port_setup_complete' }
+  | { type: 'ext_port_teardown_complete' }
   | { type: 'threshold_violation'; violations: string[] }
   | { type: 'error'; message: string }
 

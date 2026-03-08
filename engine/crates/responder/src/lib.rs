@@ -14,7 +14,7 @@ use net_meter_core::{PayloadProfile, Protocol};
 use net_meter_metrics::Collector;
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
@@ -129,42 +129,50 @@ fn spawn_http_server(
     let tls_acceptor = tls_config.map(|cfg| TlsAcceptor::from(cfg));
 
     tokio::spawn(async move {
+        // JoinSet으로 per-connection 태스크를 추적한다.
+        // 리스너 태스크가 abort되면 JoinSet이 drop되어 모든 연결 태스크도 abort된다.
+        let mut conn_tasks: JoinSet<()> = JoinSet::new();
+
         loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!(error = %e, "Accept error");
-                    continue;
-                }
-            };
-
-            if tcp_quickack {
-                if let Err(e) = set_quickack(&stream) {
-                    warn!(peer = %peer, error = %e, "Failed to set TCP_QUICKACK");
-                }
-            }
-
-            let g = Arc::clone(&global);
-            let p = Arc::clone(&proto);
-
-            if let Some(ref acceptor) = tls_acceptor {
-                // TLS 모드: TLS 핸드쉐이크 후 HTTP 처리
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(stream).await {
-                        Ok(s) => s,
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, peer) = match result {
+                        Ok(v) => v,
                         Err(e) => {
-                            debug!(peer = %peer, error = %e, "TLS accept failed");
-                            return;
+                            debug!(error = %e, "Accept error");
+                            continue;
                         }
                     };
-                    serve_http(TokioIo::new(tls_stream), is_h2, body_size, g, p, peer).await;
-                });
-            } else {
-                // 평문 모드
-                tokio::spawn(async move {
-                    serve_http(TokioIo::new(stream), is_h2, body_size, g, p, peer).await;
-                });
+
+                    if tcp_quickack {
+                        if let Err(e) = set_quickack(&stream) {
+                            warn!(peer = %peer, error = %e, "Failed to set TCP_QUICKACK");
+                        }
+                    }
+
+                    let g = Arc::clone(&global);
+                    let p = Arc::clone(&proto);
+
+                    if let Some(ref acceptor) = tls_acceptor {
+                        let acceptor = acceptor.clone();
+                        conn_tasks.spawn(async move {
+                            let tls_stream = match acceptor.accept(stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    debug!(peer = %peer, error = %e, "TLS accept failed");
+                                    return;
+                                }
+                            };
+                            serve_http(TokioIo::new(tls_stream), is_h2, body_size, g, p, peer).await;
+                        });
+                    } else {
+                        conn_tasks.spawn(async move {
+                            serve_http(TokioIo::new(stream), is_h2, body_size, g, p, peer).await;
+                        });
+                    }
+                }
+                // 완료된 연결 태스크를 정리 (JoinSet 무한 증가 방지)
+                Some(_) = conn_tasks.join_next(), if !conn_tasks.is_empty() => {}
             }
         }
     })

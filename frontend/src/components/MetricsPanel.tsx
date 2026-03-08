@@ -144,18 +144,19 @@ function LatencyChart({ data, range }: { data: ChartData; range: number }) {
   )
 }
 
+const DEFAULT_LE = [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1e9]
+
 function LatencyHistogram({ snap }: { snap: MetricsSnapshot }) {
   const c = useChartColors()
-  if (!snap.latency_histogram || snap.latency_histogram.length < 2) return null
-  const buckets = snap.latency_histogram
+  const buckets = (snap.latency_histogram && snap.latency_histogram.length > 0)
+    ? snap.latency_histogram
+    : DEFAULT_LE.map(le => ({ le_ms: le, count: 0 }))
   const barData = buckets
     .slice(0, -1)
     .map((b, i) => ({
       le: b.le_ms >= 1000 ? `${b.le_ms / 1000}s` : `${b.le_ms}ms`,
       count: i === 0 ? b.count : b.count - buckets[i - 1].count,
     }))
-    .filter((d) => d.count > 0)
-  if (barData.length === 0) return null
 
   return (
     <ChartCard title="Latency Distribution">

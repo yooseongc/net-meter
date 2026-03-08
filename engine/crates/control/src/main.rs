@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use net_meter_core::{MetricsSnapshot, TestState, Thresholds};
+use net_meter_core::{MetricsSnapshot, NetworkMode, TestState, Thresholds};
+use net_meter_ns::{self, NamespaceManager};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::time::{interval, Duration};
@@ -18,6 +19,7 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::event::TestEvent;
+use crate::state::ServerNetConfig;
 
 #[derive(Parser)]
 #[command(name = "net-meter", about = "Network performance measurement tool")]
@@ -38,6 +40,26 @@ struct Cli {
     /// 지정하지 않으면 바이너리 옆의 `static/` 디렉터리를 자동 탐색한다.
     #[arg(long)]
     web_dir: Option<PathBuf>,
+
+    /// 네트워크 모드 (loopback, namespace, external_port)
+    #[arg(long, default_value = "loopback")]
+    mode: String,
+
+    /// Client 측 인터페이스 이름 (NS 모드: host veth, External Port 모드: 물리 NIC)
+    #[arg(long, default_value = "veth-c0")]
+    upper_iface: String,
+
+    /// Server 측 인터페이스 이름 (NS 모드: host veth, External Port 모드: 물리 NIC)
+    #[arg(long, default_value = "veth-s0")]
+    lower_iface: String,
+
+    /// MTU (External Port 모드에서 사용)
+    #[arg(long, default_value_t = 1500)]
+    mtu: u16,
+
+    /// Namespace prefix (NS 모드에서 사용)
+    #[arg(long, default_value = "nm")]
+    ns_prefix: String,
 }
 
 #[tokio::main]
@@ -58,7 +80,26 @@ async fn main() -> anyhow::Result<()> {
         }))
         .init();
 
-    info!("net-meter control plane starting");
+    let network_mode = match cli.mode.as_str() {
+        "namespace" => NetworkMode::Namespace,
+        "external_port" => NetworkMode::ExternalPort,
+        _ => NetworkMode::Loopback,
+    };
+
+    let server_net = ServerNetConfig {
+        mode: network_mode,
+        upper_iface: cli.upper_iface.clone(),
+        lower_iface: cli.lower_iface.clone(),
+        mtu: cli.mtu,
+        ns_prefix: cli.ns_prefix.clone(),
+    };
+
+    info!(
+        mode = %cli.mode,
+        upper_iface = %cli.upper_iface,
+        lower_iface = %cli.lower_iface,
+        "net-meter control plane starting"
+    );
 
     // 정적 파일 디렉터리 결정:
     //   1. --web-dir 명시 → 그대로 사용
@@ -76,7 +117,50 @@ async fn main() -> anyhow::Result<()> {
         info!("No web-dir found; only API endpoints are served");
     }
 
-    let state = state::AppState::new();
+    let state = state::AppState::new(server_net);
+
+    // 네트워크 인프라 초기화 (모드별)
+    match network_mode {
+        NetworkMode::Namespace => {
+            net_meter_ns::check_capability()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let mut ns = NamespaceManager::new(
+                &cli.ns_prefix,
+                &cli.upper_iface,
+                &cli.lower_iface,
+            );
+            ns.setup().await.map_err(|e| anyhow::anyhow!("NS setup failed: {}", e))?;
+            let _ = state.event_tx.send(TestEvent::NsSetupComplete);
+            info!(
+                client_ns = %ns.client_ns,
+                server_ns = %ns.server_ns,
+                upper_iface = %ns.upper_iface,
+                lower_iface = %ns.lower_iface,
+                "Namespace mode ready"
+            );
+            *state.ns_manager.lock().await = Some(ns);
+        }
+        NetworkMode::ExternalPort => {
+            net_meter_ns::check_capability()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let ext_state = net_meter_ns::setup_external_port(
+                &cli.upper_iface,
+                &cli.lower_iface,
+                cli.mtu,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("External port setup failed: {}", e))?;
+            let _ = state.event_tx.send(TestEvent::ExtPortSetupComplete);
+            info!(
+                upper_iface = %cli.upper_iface,
+                lower_iface = %cli.lower_iface,
+                mtu = cli.mtu,
+                "External port mode ready"
+            );
+            *state.ext_port_state.lock().await = Some(ext_state);
+        }
+        NetworkMode::Loopback => {}
+    }
 
     // 백그라운드: 1초 간격으로 메트릭 집계, 임계값 체크, 브로드캐스트
     let state_clone = Arc::clone(&state);
@@ -119,9 +203,58 @@ async fn main() -> anyhow::Result<()> {
     info!(addr = %addr, "Control API server listening");
 
     let app = api::router(Arc::clone(&state), web_dir);
-    axum::serve(listener, app).await?;
 
+    // SIGINT/SIGTERM 수신 시 서버를 즉시 중단하고 teardown으로 진행
+    // (with_graceful_shutdown은 WebSocket 등 장기 연결이 있으면 멈추므로 사용하지 않음)
+    tokio::select! {
+        r = axum::serve(listener, app) => { r?; }
+        _ = shutdown_signal() => {
+            info!("Shutdown signal received");
+        }
+    }
+
+    // 프로그램 종료 시 네트워크 인프라 정리
+    info!("Shutting down, cleaning up network resources...");
+
+    if let Some(mut ns) = state.ns_manager.lock().await.take() {
+        ns.teardown().await;
+        let _ = state.event_tx.send(TestEvent::NsTeardownComplete);
+        info!("Namespace teardown complete");
+    }
+
+    if let Some(ext_state) = state.ext_port_state.lock().await.take() {
+        net_meter_ns::teardown_external_port(&ext_state).await;
+        let _ = state.event_tx.send(TestEvent::ExtPortTeardownComplete);
+        info!("External port teardown complete");
+    }
+
+    info!("Shutdown complete");
     Ok(())
+}
+
+/// SIGINT(Ctrl+C) 또는 SIGTERM 신호를 기다린다.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { info!("Received SIGINT"); }
+        _ = terminate => { info!("Received SIGTERM"); }
+    }
 }
 
 /// 임계값 위반 항목 목록 반환 (빈 배열이면 정상)

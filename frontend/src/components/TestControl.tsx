@@ -3,7 +3,7 @@ import { Save, Download, Upload, Plus, Pencil, Trash2, ChevronDown, ChevronRight
 import {
   TestConfig, TestType, Protocol, HttpMethod,
   Association, ClientDef, ServerDef,
-  PayloadProfile, LoadConfig, NetworkConfig, NetworkMode,
+  PayloadProfile, LoadConfig, NetworkConfig,
   TcpPayload, HttpPayload, Thresholds, VlanConfig,
 } from '../api/client'
 import { useTestStore } from '../store/testStore'
@@ -47,8 +47,6 @@ const defaultAssociation = (clients: ClientDef[], servers: ServerDef[], idx: num
 })
 
 const defaultNetworkConfig = (): NetworkConfig => ({
-  mode: 'loopback',
-  ns: { netns_prefix: 'nm' },
   tcp_quickack: false,
 })
 
@@ -538,7 +536,6 @@ export default function TestControl() {
   }
 
   const protoLabel = (p: string) => p === 'tcp' ? 'TCP' : p === 'http1' ? 'HTTP/1.1' : 'HTTP/2'
-  const modeLabel = (m: NetworkMode) => m === 'loopback' ? 'Loopback' : m === 'namespace' ? 'Namespace' : 'Ext Port'
 
   const clientName = (id: string) => config.clients.find((c) => c.id === id)?.name ?? id.slice(0, 8)
   const serverName = (id: string) => {
@@ -586,7 +583,7 @@ export default function TestControl() {
               <Button
                 variant="secondary" size="xs"
                 onClick={() => {
-                  saveProfile({ ...config, id: uuidv4() })
+                  saveProfile(config)
                   setSaveMsg('Saved!')
                   setTimeout(() => setSaveMsg(null), 2000)
                 }}
@@ -708,28 +705,12 @@ export default function TestControl() {
 
           {/* Network */}
           <Section title="Network" defaultOpen={false}>
-            <Field label="Mode">
-              <NativeSelect value={config.network.mode}
-                onChange={(e) => setNetworkField('mode', e.target.value as NetworkMode)}>
-                <option value="loopback">Loopback (localhost, 개발/검증용)</option>
-                <option value="namespace">Namespace (Linux netns, CAP_NET_ADMIN 필요)</option>
-                <option value="external_port">External Port (Phase 11, 미구현)</option>
-              </NativeSelect>
-            </Field>
-            {config.network.mode === 'namespace' && (
-              <Field label="NS Prefix">
-                <Input value={config.network.ns.netns_prefix}
-                  onChange={(e) => setNetworkField('ns', { ...config.network.ns, netns_prefix: e.target.value })} />
-              </Field>
-            )}
-            {config.network.mode === 'external_port' && (
-              <div className="text-xs text-warning bg-warning/10 border border-warning rounded px-3 py-2">
-                ⚠ External Port 모드는 Phase 11에서 구현 예정입니다.
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground">
+              네트워크 모드(loopback / namespace / external_port)는 서버 시작 시 CLI 인수로 결정됩니다.
+            </p>
             <label className="flex items-center gap-2.5 text-sm cursor-pointer">
               <Switch
-                checked={config.network.tcp_quickack}
+                checked={config.network.tcp_quickack ?? false}
                 onCheckedChange={(v) => setNetworkField('tcp_quickack', v)}
               />
               TCP_QUICKACK (disable delayed ACK)
@@ -822,7 +803,7 @@ export default function TestControl() {
           </Section>
 
           {/* Associations */}
-          <Section title={`Associations (${config.associations.length}) — Mode: ${modeLabel(config.network.mode)}`} defaultOpen>
+          <Section title={`Associations (${config.associations.length})`} defaultOpen>
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-xs">
                 <thead>

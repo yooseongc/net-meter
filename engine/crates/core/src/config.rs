@@ -397,67 +397,16 @@ pub enum NetworkMode {
     ExternalPort,
 }
 
-/// Namespace 모드 전용 설정
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NsOptions {
-    #[serde(default = "default_ns_prefix")]
-    pub netns_prefix: String,
-}
-
-fn default_ns_prefix() -> String {
-    "nm".to_string()
-}
-
-impl Default for NsOptions {
-    fn default() -> Self {
-        Self { netns_prefix: "nm".to_string() }
-    }
-}
-
-/// External Port 모드 전용 설정
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalPortOptions {
-    pub client_iface: String,
-    pub server_iface: String,
-    #[serde(default)]
-    pub client_gateway: Option<String>,
-    #[serde(default)]
-    pub client_gateway_mac: Option<String>,
-    #[serde(default)]
-    pub server_gateway: Option<String>,
-    #[serde(default)]
-    pub server_gateway_mac: Option<String>,
-    #[serde(default)]
-    pub flush_iface_addrs: bool,
-    #[serde(default = "default_true")]
-    pub cleanup_addrs: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// 전체 네트워크/소켓 설정
+/// 전체 네트워크/소켓 설정 (TestConfig 내 — tcp_quickack만)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    #[serde(default)]
-    pub mode: NetworkMode,
-    #[serde(default)]
-    pub ns: NsOptions,
-    #[serde(default)]
-    pub ext: Option<ExternalPortOptions>,
     #[serde(default)]
     pub tcp_quickack: bool,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        Self {
-            mode: NetworkMode::Loopback,
-            ns: NsOptions::default(),
-            ext: None,
-            tcp_quickack: false,
-        }
+        Self { tcp_quickack: false }
     }
 }
 

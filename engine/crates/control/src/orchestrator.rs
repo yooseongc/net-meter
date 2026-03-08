@@ -6,7 +6,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use net_meter_core::{NetworkMode, PayloadProfile, Protocol, TestConfig, TestState};
 use net_meter_generator::Generator;
 use net_meter_metrics::Collector;
-use net_meter_ns::NamespaceManager;
 use net_meter_responder::Responder;
 use tracing::{error, info};
 
@@ -18,10 +17,12 @@ use crate::state::AppState;
 ///
 /// start() → Preparing → Running
 /// stop()  → Stopping  → Completed
+///
+/// NS/ExtPort 인프라는 프로그램 시작/종료 시 main에서 관리하며,
+/// Orchestrator는 Generator/Responder 생명주기만 담당한다.
 pub struct Orchestrator {
     generator: Generator,
     responder: Responder,
-    ns_manager: Option<NamespaceManager>,
 }
 
 impl Orchestrator {
@@ -29,7 +30,6 @@ impl Orchestrator {
         Self {
             generator: Generator::new(),
             responder: Responder::new(),
-            ns_manager: None,
         }
     }
 
@@ -86,7 +86,7 @@ impl Orchestrator {
             associations = config.associations.len(),
             servers = config.servers.len(),
             clients = config.clients.len(),
-            network_mode = ?config.network.mode,
+            network_mode = ?state.server_net.mode,
             tls = has_tls,
             "Starting test"
         );
@@ -96,7 +96,7 @@ impl Orchestrator {
             duration_secs: config.duration_secs,
         });
 
-        match config.network.mode {
+        match state.server_net.mode {
             NetworkMode::Namespace => {
                 match self
                     .start_ns_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
@@ -124,11 +124,17 @@ impl Orchestrator {
                 }
             }
             NetworkMode::ExternalPort => {
-                error!("ExternalPort mode is not yet implemented (Phase 11)");
-                *state.test_state.write().await = TestState::Failed;
-                let _ = state.event_tx.send(TestEvent::Error {
-                    message: "ExternalPort mode not implemented (planned for Phase 11)".to_string(),
-                });
+                match self
+                    .start_external_port_mode(config, proto_collectors, Arc::clone(&state), tls_bundle)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!(error = %e, "Failed to start test in external port mode");
+                        *state.test_state.write().await = TestState::Failed;
+                        let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
+                    }
+                }
             }
         }
     }
@@ -201,21 +207,40 @@ impl Orchestrator {
         state: Arc<AppState>,
         tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
-        net_meter_ns::check_capability().map_err(|e| anyhow::anyhow!("{}", e))?;
+        // NS는 프로그램 시작 시 이미 생성되어 있어야 한다.
+        let ns_guard = state.ns_manager.lock().await;
+        let ns = ns_guard.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Namespace not initialized. Server may not have started in namespace mode.")
+        })?;
 
-        let mut ns = NamespaceManager::new(&config.network.ns.netns_prefix);
-        ns.setup().await.map_err(|e| anyhow::anyhow!("{}", e))?;
-        let _ = state.event_tx.send(TestEvent::NsSetupComplete);
+        // default_load를 사용하는 association 수로 num_connections를 나눠
+        // per-association client IP 수를 계산한다.
+        let default_assoc_count = config.associations.iter()
+            .filter(|a| a.load.is_none())
+            .count()
+            .max(1) as u32;
+        let total_clients = config.default_load.effective_num_connections() as u32;
+        let per_assoc_count = (total_clients / default_assoc_count).max(1);
+
+        // count가 None인 ClientDef에 per_assoc_count를 적용해 IP 할당 수를 결정한다.
+        let patched_clients: Vec<net_meter_core::ClientDef> = config.clients.iter().map(|c| {
+            if c.count.is_none() {
+                net_meter_core::ClientDef { count: Some(per_assoc_count), ..c.clone() }
+            } else {
+                c.clone()
+            }
+        }).collect();
 
         let (pair_addrs, server_binds, client_ip_lists) = ns
-            .setup_network(&config.clients, &config.servers, &config.associations)
+            .setup_network(&patched_clients, &config.servers, &config.associations)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let client_ips: HashMap<String, Vec<String>> = client_ip_lists;
-
         let client_ns_name = ns.client_ns.clone();
         let server_ns_name = ns.server_ns.clone();
+        drop(ns_guard); // 락 해제 후 generator/responder 시작
+
         let tcp_quickack = config.network.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
 
@@ -267,9 +292,21 @@ impl Orchestrator {
             .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_tls, &client_ips)
             .await;
 
-        self.ns_manager = Some(ns);
         self.transition_to_running(config, state).await;
         Ok(())
+    }
+
+    /// External Port 모드: 물리 NIC 2개를 직접 설정하고 외부 DUT를 경유하는 트래픽을 발생시킨다.
+    async fn start_external_port_mode(
+        &mut self,
+        config: TestConfig,
+        proto_collectors: HashMap<Protocol, Arc<Collector>>,
+        state: Arc<AppState>,
+        tls_bundle: Option<crate::tls::TlsBundle>,
+    ) -> anyhow::Result<()> {
+        // ExtPort NIC 설정은 프로그램 시작 시 이미 완료되어 있다.
+        // Generator/Responder는 로컬 모드와 동일하게 실행한다.
+        self.start_local_mode(config, proto_collectors, state, tls_bundle).await
     }
 
     /// Running 상태로 전환하고 duration 기반 자동 종료를 등록한다.
@@ -351,18 +388,14 @@ impl Orchestrator {
         }
     }
 
-    /// 실제 종료 처리: generator/responder 중지, NS 정리, 결과 저장.
+    /// 실제 종료 처리: generator/responder 중지, 결과 저장.
+    /// NS/ExtPort 인프라는 프로그램 종료 시 main에서 teardown한다.
     async fn do_stop(&mut self, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Stopping;
         info!("Stopping test");
 
         self.generator.stop().await;
         self.responder.stop_all();
-
-        if let Some(mut ns) = self.ns_manager.take() {
-            ns.teardown().await;
-            let _ = state.event_tx.send(TestEvent::NsTeardownComplete);
-        }
 
         {
             let mut agg = state.aggregator.lock().await;

@@ -104,14 +104,25 @@ function MetricsSummary({ snap }: { snap: MetricsSnapshot }) {
   )
 }
 
+// ─── DUT 박스 (External Port 모드) ──────────────────────────────────────────────
+
+function DutBox({ label }: { label: string }) {
+  return (
+    <div className="rounded-lg px-4 py-3 min-w-[110px] border-2 border-dashed border-muted-foreground/40 bg-muted/20 flex flex-col items-center justify-center gap-0.5">
+      <div className="font-bold text-xs text-muted-foreground">{label}</div>
+      <div className="text-[10px] text-muted-foreground/60">외부 장비</div>
+    </div>
+  )
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function TopologyView({ compact = false }: { compact?: boolean }) {
-  const { testState, activeProfile, latestSnapshot: snap } = useTestStore()
+  const { testState, latestSnapshot: snap, networkMode, upperIface, lowerIface } = useTestStore()
 
   const isRunning = testState === 'running'
-  const useNs = activeProfile?.network.mode === 'namespace'
-  const prefix = activeProfile?.network.ns.netns_prefix ?? 'nm'
+  const useNs = networkMode === 'namespace'
+  const useExtPort = networkMode === 'external_port'
 
   const clientStats = snap ? [
     { label: 'CPS', value: snap.cps.toFixed(1) + '/s', cls: 'text-success' },
@@ -127,26 +138,58 @@ export default function TopologyView({ compact = false }: { compact?: boolean })
     { label: 'Errors', value: (snap.status_4xx + snap.status_5xx).toLocaleString(), cls: snap.status_4xx + snap.status_5xx > 0 ? 'text-destructive' : 'text-muted-foreground' },
   ] : undefined
 
-  // 단순 다이어그램: Generator (Client) ─── Responder (Server)
-  const arrowLabel = useNs
-    ? `${prefix}-client → host → ${prefix}-server`
-    : 'loopback'
-
-  const diagram = (
+  // External Port 다이어그램: Generator ─upper─ DUT ─lower─ Responder
+  const extPortDiagram = useExtPort ? (
     <div className={cn('flex items-center justify-center gap-0 flex-wrap', compact ? 'py-2' : 'py-8')}>
       <NodeBox
         title="Generator"
-        subtitle="Client"
+        subtitle={`Client · ${upperIface}`}
         stats={clientStats}
         active={isRunning}
       />
-      <Arrow animated={isRunning} label={arrowLabel} />
+      <Arrow animated={isRunning} label={upperIface} />
+      <DutBox label="DUT" />
+      <Arrow animated={isRunning} label={lowerIface} />
       <NodeBox
         title="Responder"
-        subtitle="Server"
+        subtitle={`Server · ${lowerIface}`}
         stats={serverStats}
         active={isRunning}
       />
+    </div>
+  ) : null
+
+  // NS 모드: prefix에서 NS 이름 추론
+  const nsPrefix = upperIface.startsWith('veth-') ? 'nm' : upperIface.split('-')[0] ?? 'nm'
+  const clientNs = `${nsPrefix}-client`
+  const serverNs = `${nsPrefix}-server`
+
+  const diagram = useExtPort ? extPortDiagram! : useNs ? (
+    <div className={cn('flex items-center justify-center gap-0 flex-wrap', compact ? 'py-2' : 'py-8')}>
+      <NodeBox
+        title="Generator"
+        subtitle={`[${clientNs}]\nclient IPs`}
+        stats={clientStats}
+        active={isRunning}
+      />
+      <Arrow animated={isRunning} label={upperIface} />
+      <div className="rounded-lg px-3 py-2 border-2 border-dashed border-muted-foreground/40 bg-muted/10 flex flex-col items-center justify-center gap-0.5 min-w-[90px]">
+        <div className="font-bold text-[10px] text-muted-foreground">Bridge / SW</div>
+        <div className="text-[9px] text-muted-foreground/60">operator setup</div>
+      </div>
+      <Arrow animated={isRunning} label={lowerIface} />
+      <NodeBox
+        title="Responder"
+        subtitle={`[${serverNs}]\nserver IPs`}
+        stats={serverStats}
+        active={isRunning}
+      />
+    </div>
+  ) : (
+    <div className={cn('flex items-center justify-center gap-0 flex-wrap', compact ? 'py-2' : 'py-8')}>
+      <NodeBox title="Generator" subtitle="Client" stats={clientStats} active={isRunning} />
+      <Arrow animated={isRunning} label="loopback" />
+      <NodeBox title="Responder" subtitle="Server" stats={serverStats} active={isRunning} />
     </div>
   )
 
@@ -159,7 +202,9 @@ export default function TopologyView({ compact = false }: { compact?: boolean })
               <div className="flex items-center justify-between mb-1">
                 <CardTitle>Network Topology</CardTitle>
                 <span className="text-xs text-muted-foreground">
-                  {useNs ? `Namespace · ${prefix}` : 'Loopback'}
+                  {useExtPort
+                    ? `Ext Port · ${upperIface} / ${lowerIface}`
+                    : useNs ? `Namespace · ${clientNs} ↔ Bridge/SW ↔ ${serverNs}` : 'Loopback'}
                 </span>
               </div>
               {diagram}
@@ -182,9 +227,11 @@ export default function TopologyView({ compact = false }: { compact?: boolean })
       <Card>
         <CardContent className="text-sm text-muted-foreground">
           <span className="text-foreground font-semibold">Mode: </span>
-          {useNs
-            ? `Namespace isolation — ${prefix}-client ↔ host ↔ ${prefix}-server`
-            : 'Local mode — generator and responder on localhost'}
+          {useExtPort
+            ? `External Port — Generator(${upperIface}) ↔ DUT ↔ Responder(${lowerIface})`
+            : useNs
+              ? `Namespace isolation — [${clientNs}] ↔ Bridge/SW (operator) ↔ [${serverNs}]`
+              : 'Local mode — generator and responder on localhost'}
         </CardContent>
       </Card>
 

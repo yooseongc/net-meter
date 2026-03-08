@@ -15,7 +15,7 @@
 | 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | ✅ 완료 |
 | 9 | ~~eBPF/XDP 옵션~~ | 취소 |
 | 10 | Association 기반 설정 전환 + VLAN 지원 | ✅ 완료 |
-| 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | 설계 완료, 미구현 |
+| 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | ✅ 완료 |
 | UI-R | Frontend UI 전면 리팩터 — shadcn/ui + Tailwind CSS v4 + Dark/Light 모드 | ✅ 완료 |
 | UI-1 | UI 개선 Phase A/B/C | ✅ 완료 |
 | UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | ✅ 완료 |
@@ -23,6 +23,55 @@
 | P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | ✅ 완료 |
 | P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | ✅ 완료 |
 | P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | ✅ 완료 |
+| 11 | Phase 11 — External Port Mode (물리 NIC, DUT 연동, VLAN, static ARP) | ✅ 완료 |
+
+---
+
+## Phase 11: External Port Mode ✅
+
+**목표:** 물리 NIC 2개를 직접 사용하여 외부 DUT(피시험 장비)를 경유하는 트래픽 시험
+
+**달성 사항:**
+- [x] `engine/crates/ns/src/veth.rs`: 호스트 레벨 헬퍼 추가
+  - `flush_iface`, `del_ip`, `assign_ips` — IP 할당/제거
+  - `add_vlan_subif`, `add_qinq_subif`, `del_link` — VLAN subif (호스트 레벨)
+  - `set_neigh`, `del_neigh` — static ARP 엔트리 관리
+  - `check_iface` — NIC 존재 확인
+- [x] `engine/crates/ns/src/port.rs` (신규): External Port 설정/해제
+  - `ExternalPortState` — teardown을 위한 상태 추적 (할당 IP, VLAN subif 목록)
+  - `setup_external_port()` — NIC 확인 → flush → IP 할당 → VLAN subif → static ARP
+  - `teardown_external_port()` — VLAN subif 삭제 → IP 제거 → ARP 제거
+- [x] `engine/crates/ns/src/lib.rs`: port 모듈 export
+- [x] `engine/crates/control/src/event.rs`: `ExtPortSetupComplete`, `ExtPortTeardownComplete` 이벤트 추가
+- [x] `engine/crates/control/src/orchestrator.rs`: `NetworkMode::ExternalPort` 분기 구현
+  - `start_external_port_mode()` 메서드 추가
+  - `Orchestrator.ext_port_state` 필드 추가
+  - `do_stop()`에서 `teardown_external_port()` 호출
+- [x] `frontend/src/components/TestControl.tsx`: External Port 설정 폼 구현
+  - client_iface, server_iface 입력
+  - client/server gateway IP + MAC (static ARP용)
+  - flush/cleanup 토글 스위치
+  - mode 선택 시 기본값 자동 설정
+- [x] `frontend/src/components/TopologyView.tsx`: External Port 다이어그램 추가
+  - `Generator(eth1) → DUT → Responder(eth2)` 다이어그램
+  - NIC 이름, gateway 정보 표시
+- [x] `frontend/src/api/client.ts`: `ext_port_setup_complete`, `ext_port_teardown_complete` 이벤트 타입 추가
+- [x] `frontend/src/store/testStore.ts`: 새 이벤트 타입 핸들러 추가
+
+**토폴로지:**
+```
+[net-meter 단일 호스트]
+  Generator                             Responder
+  (client IPs bind)                     (server IPs bind)
+       |                                     |
+  eth1 (client_iface) ──→ [DUT] ──→  eth2 (server_iface)
+```
+
+**소켓 바인딩 전략:**
+- Generator: `bind(src_ip, 0)` — client IP를 소스로 고정
+- Responder: `TcpListener::bind(server_ip:port)` — 특정 server IP에 리슨
+
+**권한:** CAP_NET_ADMIN (또는 root) 필요
 
 ---
 
@@ -514,6 +563,39 @@ npm run build → ✓ built in 2.41s
 | 이벤트로그 타임스탬프 | `new Date().toLocaleTimeString()` → 명시적 `HH:MM:SS` 포맷 (초 항상 표시) |
 | Config 저장 중복 | "Save to Profiles" 클릭 시 항상 새 UUID 생성 → 기존 항목 덮어쓰기 방지 |
 | 차트 선형화 | Recharts `type="monotone"` (베지에) → `type="linear"` (직선 보간, 실측값 정확 표시) |
+
+---
+
+## NS 토폴로지 개선: routed 방식 전환 ✅
+
+**문제:**
+1. 기존 bridge 방식은 모든 IP를 `10.10.1.0/24` 단일 서브넷으로 하드코딩 — 다중 서브넷 불가
+2. `ServerDef.ip` 무시: 서버 IP가 항상 `10.10.1.201+`로 하드코딩됨
+3. 두 번째 시험 실행 시 서버 IP alias 재추가 실패 (`ip addr add` "File exists")
+4. `10.10.2.1` 클라이언트 → `10.10.1.201` 서버: 서버 NS에 `10.10.2.0/24` route 없어 불통
+
+**변경:**
+- `NamespaceManager::setup()`: bridge 제거 → routed 토폴로지
+  - host link IPs: `veth-c0=10.255.1.1/30`, `veth-s0=10.255.2.1/30`
+  - NS link IPs: client NS `10.255.1.2/30`, server NS `10.255.2.2/30`
+  - 각 NS에 default gw 설정 (client: `10.255.1.1`, server: `10.255.2.1`)
+  - 호스트 IP forwarding 활성화
+- `NamespaceManager::setup_network()`:
+  - 서버 IP: `ServerDef.ip` 우선 사용, None이면 `10.20.1.{1,2,...}` 자동 할당
+  - 서버 IP는 `/32`로 server NS에 할당
+  - 호스트 routes: client CIDR → `upper_iface`, server IP/32 → `lower_iface` (`ip route replace` 멱등)
+  - 두 번째 실행 시 "already exists" 오류 안전 처리
+- `veth.rs`: `replace_route_dev()`, `enable_ip_forward()` 추가
+- `TopologyView.tsx`: bridge 표시 → "Host Router" 표시
+
+**결과 토폴로지:**
+```
+[client NS]                   [host: ip_forward=1]              [server NS]
+  10.255.1.2/30 ←─link─→  veth-c0: 10.255.1.1/30            10.255.2.2/30
+  client CIDRs              veth-s0: 10.255.2.1/30  ─link─→  server IPs (/32)
+  default gw: 10.255.1.1                                        default gw: 10.255.2.1
+```
+임의 client/server 서브넷 지원. server.ip 필드 완전 적용.
 
 ---
 

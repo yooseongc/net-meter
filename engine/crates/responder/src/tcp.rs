@@ -4,7 +4,7 @@ use net_meter_core::TcpPayload;
 use net_meter_metrics::Collector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::debug;
 
 /// TCP 서버 스폰: accept 루프 + 연결당 핸들러 태스크
@@ -17,19 +17,25 @@ pub fn spawn_tcp_server(
     let client_tx = payload.tx_bytes; // 클라이언트가 보내는 바이트 (서버가 읽을 양)
     let server_tx = payload.rx_bytes; // 서버가 응답할 바이트 수
     tokio::spawn(async move {
+        let mut conn_tasks: JoinSet<()> = JoinSet::new();
         loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!(error = %e, "TCP accept error");
-                    continue;
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, _peer) = match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug!(error = %e, "TCP accept error");
+                            continue;
+                        }
+                    };
+                    let g = Arc::clone(&global);
+                    let p = Arc::clone(&proto);
+                    conn_tasks.spawn(async move {
+                        handle_conn(stream, client_tx, server_tx, g, p).await;
+                    });
                 }
-            };
-            let g = Arc::clone(&global);
-            let p = Arc::clone(&proto);
-            tokio::spawn(async move {
-                handle_conn(stream, client_tx, server_tx, g, p).await;
-            });
+                Some(_) = conn_tasks.join_next(), if !conn_tasks.is_empty() => {}
+            }
         }
     })
 }
