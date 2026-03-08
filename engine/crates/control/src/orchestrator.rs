@@ -296,7 +296,8 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// External Port 모드: 물리 NIC 2개를 직접 설정하고 외부 DUT를 경유하는 트래픽을 발생시킨다.
+    /// External Port 모드: upper/lower 인터페이스에 IP를 할당하고
+    /// Generator는 client IP 바인딩, Responder는 server IP 바인딩으로 실행한다.
     async fn start_external_port_mode(
         &mut self,
         config: TestConfig,
@@ -304,9 +305,96 @@ impl Orchestrator {
         state: Arc<AppState>,
         tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
-        // ExtPort NIC 설정은 프로그램 시작 시 이미 완료되어 있다.
-        // Generator/Responder는 로컬 모드와 동일하게 실행한다.
-        self.start_local_mode(config, proto_collectors, state, tls_bundle).await
+        let upper_iface = state.server_net.upper_iface.clone();
+        let lower_iface = state.server_net.lower_iface.clone();
+
+        // per-assoc client count 계산 (NS 모드와 동일 로직)
+        let default_assoc_count = config.associations.iter()
+            .filter(|a| a.load.is_none())
+            .count()
+            .max(1) as u32;
+        let total_clients = config.default_load.effective_num_connections() as u32;
+        let per_assoc_count = (total_clients / default_assoc_count).max(1);
+
+        let patched_clients: Vec<net_meter_core::ClientDef> = config.clients.iter().map(|c| {
+            if c.count.is_none() {
+                net_meter_core::ClientDef { count: Some(per_assoc_count), ..c.clone() }
+            } else {
+                c.clone()
+            }
+        }).collect();
+
+        // 인터페이스에 IP 할당 + 주소 맵 구성
+        let (pair_addrs, server_binds, client_ip_lists) =
+            net_meter_ns::assign_ext_port_network(
+                &upper_iface,
+                &lower_iface,
+                &patched_clients,
+                &config.servers,
+                &config.associations,
+                per_assoc_count,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // 정책 라우팅 설정 (DUT proxy ARP 방향 강제)
+        let client_cidrs: Vec<String> = patched_clients.iter().map(|c| c.cidr.clone()).collect();
+        let server_ips: Vec<String> = server_binds
+            .values()
+            .filter_map(|addr| addr.split(':').next().map(|s| s.to_string()))
+            .collect();
+        let policy_state = net_meter_ns::setup_policy_routing(
+            &upper_iface,
+            &lower_iface,
+            &client_cidrs,
+            &server_ips,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Policy routing setup failed: {}", e))?;
+        *state.ext_policy_routing.lock().await = Some(policy_state);
+
+        let tcp_quickack = config.network.tcp_quickack;
+        let global = Arc::clone(&state.global_metrics);
+        let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
+        let client_tls = tls_bundle.map(|b| b.client_config);
+        let server_map = config.server_map();
+
+        // Responder: 각 server IP에 바인딩 (로컬 모드, NS 없음)
+        for (server_id, bind_addr_str) in &server_binds {
+            let server = match server_map.get(server_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            let bind_addr: SocketAddr = bind_addr_str
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind addr {}: {}", bind_addr_str, e))?;
+
+            let proto_col = proto_collectors
+                .get(&server.protocol)
+                .cloned()
+                .unwrap_or_else(Collector::new);
+            let pair_server_tls = if server.tls { server_tls.clone() } else { None };
+            let payload = config.associations.iter()
+                .find(|a| &a.server_id == server_id)
+                .map(|a| a.payload.clone())
+                .unwrap_or_else(|| PayloadProfile::default_for(server.protocol));
+
+            self.responder
+                .start_server(bind_addr, server.protocol, &payload,
+                    Arc::clone(&global), proto_col, tcp_quickack, pair_server_tls)
+                .await
+                .map_err(|e| anyhow::anyhow!("Responder start failed for {}: {}", server_id, e))?;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Generator: NS 없음, client IP 바인딩으로 실행
+        self.generator
+            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls, &client_ip_lists)
+            .await;
+
+        self.transition_to_running(config, state).await;
+        Ok(())
     }
 
     /// Running 상태로 전환하고 duration 기반 자동 종료를 등록한다.
@@ -396,6 +484,13 @@ impl Orchestrator {
 
         self.generator.stop().await;
         self.responder.stop_all();
+
+        // External Port 모드: 정책 라우팅 정리
+        if state.server_net.mode == NetworkMode::ExternalPort {
+            if let Some(ps) = state.ext_policy_routing.lock().await.take() {
+                net_meter_ns::teardown_policy_routing(&ps).await;
+            }
+        }
 
         {
             let mut agg = state.aggregator.lock().await;

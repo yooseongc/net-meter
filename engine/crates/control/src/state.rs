@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use net_meter_core::{MetricsSnapshot, NetworkMode, Protocol, TestConfig, TestState};
 use net_meter_metrics::{Collector, MultiAggregator};
-use net_meter_ns::{ExternalPortState, NamespaceManager};
+use net_meter_ns::{ExternalPortState, NamespaceManager, PolicyRoutingState};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::event::TestEvent;
@@ -82,6 +82,9 @@ pub struct AppState {
 
     /// External Port 모드: 프로그램 시작 시 설정, 종료 시 복원
     pub ext_port_state: Mutex<Option<ExternalPortState>>,
+
+    /// External Port 모드 정책 라우팅 상태 (시험 시작 시 설정, 종료 시 정리)
+    pub ext_policy_routing: Mutex<Option<PolicyRoutingState>>,
 }
 
 impl AppState {
@@ -107,6 +110,7 @@ impl AppState {
             test_results: RwLock::new(Vec::new()),
             ns_manager: Mutex::new(None),
             ext_port_state: Mutex::new(None),
+            ext_policy_routing: Mutex::new(None),
         })
     }
 }

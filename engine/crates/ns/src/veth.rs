@@ -245,6 +245,31 @@ pub async fn add_qinq_subif_in_ns(
     Ok(inner_subif)
 }
 
+/// policy routing rule 추가: ip rule add from <cidr> lookup <table>
+pub async fn add_ip_rule(from_cidr: &str, table: u32) -> Result<(), NetMeterError> {
+    run_ip(&["rule", "add", "from", from_cidr, "lookup", &table.to_string()]).await
+}
+
+/// policy routing rule 삭제: ip rule del from <cidr> lookup <table>
+pub async fn del_ip_rule(from_cidr: &str, table: u32) -> Result<(), NetMeterError> {
+    run_ip(&["rule", "del", "from", from_cidr, "lookup", &table.to_string()]).await
+}
+
+/// 특정 라우팅 테이블에 default route 추가 (dev 직접 지정)
+pub async fn add_route_table_dev(dev: &str, table: u32) -> Result<(), NetMeterError> {
+    run_ip(&["route", "add", "default", "dev", dev, "table", &table.to_string()]).await
+}
+
+/// 특정 라우팅 테이블을 flush
+pub async fn flush_route_table(table: u32) -> Result<(), NetMeterError> {
+    run_ip(&["route", "flush", "table", &table.to_string()]).await
+}
+
+/// ip rule / route 중복 추가 에러 여부 (RTNETLINK answers: File exists)
+pub(crate) fn is_rule_exists_error(msg: &str) -> bool {
+    msg.contains("File exists")
+}
+
 /// IP 주소 중복 할당 에러 여부를 판단한다.
 ///
 /// 커널 버전에 따라 에러 메시지가 다르다:
