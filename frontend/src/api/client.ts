@@ -10,6 +10,7 @@ export type TestState =
   | 'preparing'
   | 'ramping_up'
   | 'running'
+  | 'ramping_down'
   | 'stopping'
   | 'completed'
   | 'failed'
@@ -41,12 +42,15 @@ export type PayloadProfile = TcpPayload | HttpPayload
 // ---------------------------------------------------------------------------
 
 export interface LoadConfig {
-  /** CPS: 워커당 병렬 연결 루프 수 (기본 1 = 순차).
-   *  CC/BW: 워커당 유지할 동시 연결 수. */
+  /** CPS: 전체 병렬 연결 루프 수 (워커 수로 자동 분배, 기본 1).
+   *  CC/BW: 전체 유지할 동시 연결 수 (워커 수로 자동 분배). */
   num_connections?: number
   connect_timeout_ms?: number
   response_timeout_ms?: number
+  /** 목표까지 점진적으로 증가하는 구간(초). 0이면 즉시 전속력. */
   ramp_up_secs?: number
+  /** 종료 전 부하를 점진적으로 감소하는 구간(초). 0이면 즉시 중지. */
+  ramp_down_secs?: number
 }
 
 export interface Thresholds {

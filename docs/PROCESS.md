@@ -20,9 +20,9 @@
 | UI-1 | UI 개선 Phase A/B/C | ✅ 완료 |
 | UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | ✅ 완료 |
 | UI-3 | 소규모 버그/UX 수정 (이벤트로그 타임스탬프, 저장 중복, 차트 선형화) | ✅ 완료 |
-| P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | 계획 |
-| P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | 계획 |
-| P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | 계획 |
+| P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | ✅ 완료 |
+| P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | ✅ 완료 |
+| P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | ✅ 완료 |
 
 ---
 

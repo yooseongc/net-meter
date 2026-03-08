@@ -27,9 +27,11 @@ pub async fn run(
     src_ip: Option<IpAddr>,
 ) {
     let num_conn = load.effective_num_connections() as usize;
+    let streams = payload.h2_max_concurrent_streams.unwrap_or(1) as usize;
     match test_type {
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Cc | TestType::Bw => run_cc_bw(addr, load, payload, num_conn, payload.h2_max_concurrent_streams.unwrap_or(1) as usize, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Bw => run_bw(addr, load, payload, num_conn, streams, global, proto, shutdown, deadline, tls, src_ip).await,
     }
 }
 
@@ -115,10 +117,54 @@ async fn run_cps(
 }
 
 // ---------------------------------------------------------------------------
-// CC/BW: num_conn 연결 × streams_per_conn 스트림 유지
+// CC: num_conn 연결 유지. 1초 간격 단일 스트림 요청. 연결 수 측정 집중.
 // ---------------------------------------------------------------------------
 
-async fn run_cc_bw(
+async fn run_cc(
+    addr: &str,
+    load: &LoadConfig,
+    payload: &HttpPayload,
+    num_conn: usize,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    mut shutdown: oneshot::Receiver<()>,
+    deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
+) {
+    let connect_to = load.connect_timeout();
+    let response_to = load.response_timeout();
+    let host = addr.to_string();
+    let method = to_http_method(payload.method);
+    let path = build_path(&payload.path, payload.path_extra_bytes);
+    let addr = addr.to_string();
+
+    let mut handles = Vec::with_capacity(num_conn);
+    for _ in 0..num_conn {
+        let g = Arc::clone(&global);
+        let p = Arc::clone(&proto);
+        let a = addr.clone();
+        let h = host.clone();
+        let me = method.clone();
+        let pa = path.clone();
+        let tls = tls.clone();
+        handles.push(tokio::spawn(async move {
+            h2_cc_worker(&a, &h, me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip).await;
+        }));
+    }
+
+    tokio::select! {
+        _ = &mut shutdown => {}
+        _ = wait_deadline(deadline) => {}
+    }
+    for h in handles { h.abort(); }
+}
+
+// ---------------------------------------------------------------------------
+// BW: num_conn 연결 × streams_per_conn 스트림 유지 (최대 처리량)
+// ---------------------------------------------------------------------------
+
+async fn run_bw(
     addr: &str,
     load: &LoadConfig,
     payload: &HttpPayload,
@@ -222,7 +268,80 @@ async fn single_request_h2(
 }
 
 // ---------------------------------------------------------------------------
-// h2 연결 워커 (CC/BW)
+// h2 CC 워커: 연결 유지, 1초 간격 단일 요청
+// ---------------------------------------------------------------------------
+
+async fn h2_cc_worker(
+    addr: &str,
+    host: &str,
+    method: Method,
+    path: &str,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    connect_timeout: Duration,
+    response_timeout: Duration,
+    deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
+) {
+    loop {
+        if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+        record_attempt(&global, &proto);
+        let connect_start = Instant::now();
+        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip)).await {
+            Ok(Ok(sr)) => {
+                let us = connect_start.elapsed().as_micros() as u64;
+                record_established(&global, &proto);
+                global.record_connect_latency(us);
+                proto.record_connect_latency(us);
+                sr
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "h2 CC connect failed, retrying");
+                record_failed(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(_) => {
+                debug!("h2 CC connect timed out, retrying");
+                record_failed(&global, &proto);
+                record_timeout(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+
+        loop {
+            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+            let total_start = Instant::now();
+            let result = timeout(
+                response_timeout,
+                send_h2_stream(&send_req, host, method.clone(), path, 0, &global, &proto),
+            ).await;
+
+            match result {
+                Ok(Ok((status, bytes_rx))) => {
+                    record_response(&global, &proto, status, bytes_rx, total_start.elapsed().as_micros() as u64);
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    record_timeout(&global, &proto);
+                    break;
+                }
+            }
+
+            // CC: 1초 간격 — 연결 유지가 목적
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        record_closed(&global, &proto);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// h2 BW 연결 워커 (최대 처리량)
 // ---------------------------------------------------------------------------
 
 async fn connection_worker(

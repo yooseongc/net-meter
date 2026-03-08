@@ -14,6 +14,10 @@ pub enum TestEvent {
     RampUpStarted { ramp_up_secs: u64 },
     /// Ramp-up 완료 (전속력 전환)
     RampUpComplete,
+    /// Ramp-down 단계 시작
+    RampDownStarted { ramp_down_secs: u64 },
+    /// Ramp-down 완료 (종료 처리 시작)
+    RampDownComplete,
     /// NS 환경 준비 완료
     NsSetupComplete,
     /// NS 환경 정리 완료

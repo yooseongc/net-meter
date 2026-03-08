@@ -32,7 +32,8 @@ pub async fn run(
     let num_conn = load.effective_num_connections() as usize;
     match test_type {
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Cc | TestType::Bw => run_cc_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
     }
 }
 
@@ -121,10 +122,53 @@ async fn run_cps(
 }
 
 // ---------------------------------------------------------------------------
-// CC/BW: num_conn개의 keep-alive 세션을 동시에 유지
+// CC: num_conn개의 keep-alive 세션 유지. 1초 간격 경량 요청. 연결 수 측정 집중.
 // ---------------------------------------------------------------------------
 
-async fn run_cc_bw(
+async fn run_cc(
+    addr: &str,
+    load: &LoadConfig,
+    payload: &HttpPayload,
+    num_conn: usize,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    mut shutdown: oneshot::Receiver<()>,
+    deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
+) {
+    let connect_to = load.connect_timeout();
+    let response_to = load.response_timeout();
+    let method = payload.method.as_str().to_string();
+    let path = build_path(&payload.path, payload.path_extra_bytes);
+    let addr = addr.to_string();
+
+    let mut handles = Vec::with_capacity(num_conn);
+    for _ in 0..num_conn {
+        let g = Arc::clone(&global);
+        let p = Arc::clone(&proto);
+        let a = addr.clone();
+        let me = method.clone();
+        let pa = path.clone();
+        let tls = tls.clone();
+        handles.push(tokio::spawn(async move {
+            // CC: body=0 (헤더만), 1초 간격 — 연결 유지에 집중
+            cc_keep_alive_session(&a, &me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip).await;
+        }));
+    }
+
+    tokio::select! {
+        _ = &mut shutdown => {}
+        _ = wait_deadline(deadline) => {}
+    }
+    for h in handles { h.abort(); }
+}
+
+// ---------------------------------------------------------------------------
+// BW: num_conn개의 keep-alive 세션을 동시에 유지. 최대 처리량.
+// ---------------------------------------------------------------------------
+
+async fn run_bw(
     addr: &str,
     load: &LoadConfig,
     payload: &HttpPayload,
@@ -314,7 +358,108 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// CC/BW 워커: TCP 연결을 재사용하는 keep-alive 세션
+// CC 워커: keep-alive 연결을 유지하며 1초 간격 경량 GET 요청
+// ---------------------------------------------------------------------------
+
+async fn cc_keep_alive_session(
+    addr: &str,
+    method: &str,
+    path: &str,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    connect_timeout: Duration,
+    response_timeout: Duration,
+    deadline: Option<Instant>,
+    tls: Option<Arc<ClientConfig>>,
+    src_ip: Option<IpAddr>,
+) {
+    loop {
+        if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+        record_attempt(&global, &proto);
+        let connect_start = Instant::now();
+        let tcp = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                debug!(addr, error = %e, "HTTP/1.1 CC connect failed");
+                record_failed(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(_) => {
+                debug!(addr, "HTTP/1.1 CC connect timed out");
+                record_failed(&global, &proto);
+                record_timeout(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+
+        let (mut reader, mut writer) = if let Some(cfg) = &tls {
+            let connector = TlsConnector::from(Arc::clone(cfg));
+            let sn = rustls::pki_types::ServerName::try_from("localhost").unwrap().to_owned();
+            match connector.connect(sn, tcp).await {
+                Ok(tls_stream) => {
+                    let us = connect_start.elapsed().as_micros() as u64;
+                    record_established(&global, &proto);
+                    global.record_connect_latency(us);
+                    proto.record_connect_latency(us);
+                    let (r, w) = tokio::io::split(tls_stream);
+                    (Box::new(r) as DynReader, Box::new(w) as DynWriter)
+                }
+                Err(e) => {
+                    debug!(addr, error = %e, "TLS handshake failed");
+                    record_failed(&global, &proto);
+                    continue;
+                }
+            }
+        } else {
+            let us = connect_start.elapsed().as_micros() as u64;
+            record_established(&global, &proto);
+            global.record_connect_latency(us);
+            proto.record_connect_latency(us);
+            let (r, w) = tokio::io::split(tcp);
+            (Box::new(r) as DynReader, Box::new(w) as DynWriter)
+        };
+
+        let mut buffered = BufReader::new(&mut reader);
+
+        loop {
+            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+            let total_start = Instant::now();
+            let result = timeout(
+                response_timeout,
+                do_keepalive_request(&mut buffered, &mut writer, addr, method, path, 0, &global, &proto),
+            ).await;
+
+            match result {
+                Ok(Ok((status, bytes_rx, reuse))) => {
+                    let total_us = total_start.elapsed().as_micros() as u64;
+                    record_response(&global, &proto, status, bytes_rx, total_us);
+                    if !reuse { break; }
+                }
+                Ok(Err(e)) => {
+                    debug!(addr, error = %e, "HTTP/1.1 CC IO error");
+                    break;
+                }
+                Err(_) => {
+                    debug!(addr, "HTTP/1.1 CC response timed out");
+                    record_timeout(&global, &proto);
+                    break;
+                }
+            }
+
+            // CC: 1초 간격 — 연결 유지가 목적, 처리량은 최소화
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        record_closed(&global, &proto);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BW 워커: TCP 연결을 재사용하는 keep-alive 세션 (최대 속도)
 // ---------------------------------------------------------------------------
 
 async fn keep_alive_session(

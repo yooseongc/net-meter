@@ -99,6 +99,10 @@ impl Generator {
                 client_def.effective_count() as usize
             };
 
+            // P3: 총 연결 수를 워커 수로 자동 분배 (ceiling division, 최소 1)
+            let per_worker_conns = load.connections_per_worker(worker_count);
+            let worker_load = load.clone().with_num_connections(per_worker_conns);
+
             // server_def.tls가 true이고 TLS config가 있을 때만 TLS 사용
             let assoc_tls = if server_def.tls { tls_client_config.clone() } else { None };
 
@@ -106,7 +110,7 @@ impl Generator {
                 let g = Arc::clone(&global);
                 let p = Arc::clone(&p);
                 let addr = addr.clone();
-                let load = load.clone();
+                let load = worker_load.clone();
                 let payload = payload.clone();
                 let tls = assoc_tls.clone();
 

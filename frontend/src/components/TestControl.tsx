@@ -377,7 +377,7 @@ function AssociationDialog({
             Override load settings for this association
           </label>
           {useLoadOverride && (
-            <Field label="Connections per Worker" unit="CPS: 병렬 루프 수 / CC·BW: 동시 연결 수">
+            <Field label="Total Connections" unit="CPS: 병렬 루프 수(총) / CC·BW: 동시 연결 수(총)">
               <Input type="number" min={1} value={loadOverride.num_connections ?? ''} placeholder="default"
                 onChange={(e) => setLoadField('num_connections', e.target.value)} />
             </Field>
@@ -470,10 +470,11 @@ export default function TestControl() {
     .filter((c) => referencedClientIds.has(c.id))
     .reduce((sum, c) => sum + (c.count ?? 1), 0)
 
+  // P3: num_connections는 이제 총량. CC/BW일 때 표시용으로만 사용.
   const estimatedConnections = (() => {
     const numConn = config.default_load.num_connections ?? 1
-    if (config.test_type === 'cps') return null  // CPS는 organic output
-    return totalWorkers * numConn
+    if (config.test_type === 'cps') return null
+    return numConn  // 총량 그대로 표시
   })()
 
   // ─ Client handlers ─
@@ -665,19 +666,19 @@ export default function TestControl() {
           {/* Default Load */}
           <Section title="Default Load" defaultOpen>
             <Field
-              label={config.test_type === 'cps' ? 'CPS: 병렬 루프 수 / 워커' : 'CC·BW: 동시 연결 수 / 워커'}
-              unit={config.test_type === 'cps' ? '1=순차' : undefined}
+              label={config.test_type === 'cps' ? 'CPS: 병렬 루프 수 (총)' : 'CC·BW: 동시 연결 수 (총)'}
+              unit={config.test_type === 'cps' ? '워커 수로 자동 분배' : '워커 수로 자동 분배'}
             >
               <Input type="number" min={1} value={config.default_load.num_connections ?? 1}
                 onChange={(e) => setLoadField('num_connections', e.target.value)} />
             </Field>
             {estimatedConnections !== null && (
               <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
-                예상 동시 연결:{' '}
+                총 동시 연결:{' '}
                 <span className="text-primary font-bold">
-                  ~{estimatedConnections.toLocaleString()} connections
+                  {estimatedConnections.toLocaleString()} connections
                 </span>
-                <span className="text-muted-foreground/60 ml-1">({totalWorkers} workers × {config.default_load.num_connections ?? 1})</span>
+                <span className="text-muted-foreground/60 ml-1">(÷ {totalWorkers} workers = ~{Math.ceil(estimatedConnections / Math.max(totalWorkers, 1))} per worker)</span>
               </div>
             )}
             {config.test_type === 'cps' && (
@@ -696,10 +697,16 @@ export default function TestControl() {
                   onChange={(e) => setLoadField('response_timeout_ms', e.target.value)} />
               </Field>
             </Row>
-            <Field label="Ramp-up" unit="sec (0=off)">
-              <Input type="number" value={config.default_load.ramp_up_secs ?? 0} min={0}
-                onChange={(e) => setLoadField('ramp_up_secs', e.target.value)} />
-            </Field>
+            <Row>
+              <Field label="Ramp-up" unit="sec (0=off)">
+                <Input type="number" value={config.default_load.ramp_up_secs ?? 0} min={0}
+                  onChange={(e) => setLoadField('ramp_up_secs', e.target.value)} />
+              </Field>
+              <Field label="Ramp-down" unit="sec (0=off)">
+                <Input type="number" value={config.default_load.ramp_down_secs ?? 0} min={0}
+                  onChange={(e) => setLoadField('ramp_down_secs', e.target.value)} />
+              </Field>
+            </Row>
           </Section>
 
           {/* Thresholds */}

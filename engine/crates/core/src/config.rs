@@ -133,15 +133,15 @@ impl PayloadProfile {
 // 부하 설정
 // ---------------------------------------------------------------------------
 
-/// 워커당 부하 파라미터.
+/// 부하 파라미터 (association당).
 ///
-/// - CPS 모드: 워커 1개가 connect→transact→close 루프를 최대 속도로 반복.
-///   `num_connections`는 병렬 루프 수(기본 1 = 순차).
-/// - CC/BW 모드: 워커 1개가 `num_connections`개의 연결을 동시에 유지.
+/// - CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복.
+///   `num_connections`는 전체 병렬 연결 루프 수(총량, 워커 수로 자동 분배).
+/// - CC/BW 모드: 전체 동시 연결 수 (`num_connections`)를 워커 수로 자동 분배.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadConfig {
-    /// CPS: 워커당 병렬 연결 루프 수 (기본 1 = 순차).
-    /// CC/BW: 워커당 유지할 동시 연결 수.
+    /// CPS: 전체 병렬 연결 루프 수 (워커 수로 자동 분배, 기본 1).
+    /// CC/BW: 전체 유지할 동시 연결 수 (워커 수로 자동 분배).
     #[serde(default)]
     pub num_connections: Option<u64>,
 
@@ -156,6 +156,10 @@ pub struct LoadConfig {
     /// 목표까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.
     #[serde(default)]
     pub ramp_up_secs: u64,
+
+    /// 종료 전 부하를 점진적으로 감소하는 구간 (초). 0이면 즉시 중지.
+    #[serde(default)]
+    pub ramp_down_secs: u64,
 }
 
 impl Default for LoadConfig {
@@ -165,14 +169,29 @@ impl Default for LoadConfig {
             connect_timeout_ms: Some(5000),
             response_timeout_ms: Some(30000),
             ramp_up_secs: 0,
+            ramp_down_secs: 0,
         }
     }
 }
 
 impl LoadConfig {
+    /// 전체 연결 수 (워커 분배 전 총량).
     pub fn effective_num_connections(&self) -> u64 {
         self.num_connections.unwrap_or(1).max(1)
     }
+
+    /// 워커당 연결 수. 총 연결 수를 `worker_count`로 나눈다 (최소 1).
+    pub fn connections_per_worker(&self, worker_count: usize) -> u64 {
+        let total = self.effective_num_connections() as usize;
+        let count = (total + worker_count - 1) / worker_count; // ceiling division
+        count.max(1) as u64
+    }
+
+    /// num_connections를 교체한 복사본 반환.
+    pub fn with_num_connections(self, n: u64) -> Self {
+        Self { num_connections: Some(n), ..self }
+    }
+
     pub fn connect_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.connect_timeout_ms.unwrap_or(5000))
     }

@@ -24,13 +24,14 @@ const CHART_LABELS: Record<ChartKey, string> = {
 }
 
 const STATE_VARIANT: Record<string, Parameters<typeof Badge>[0]['variant']> = {
-  idle:        'secondary',
-  preparing:   'warning',
-  ramping_up:  'purple',
-  running:     'success',
-  stopping:    'warning',
-  completed:   'default',
-  failed:      'destructive',
+  idle:         'secondary',
+  preparing:    'warning',
+  ramping_up:   'purple',
+  running:      'success',
+  ramping_down: 'purple',
+  stopping:     'warning',
+  completed:    'default',
+  failed:       'destructive',
 }
 
 // A-3: 토글 버튼 그룹
@@ -74,7 +75,7 @@ export default function TestRunPanel({
   const { testState, activeProfile, elapsedSecs, savedProfiles, startTest, stopTest } = useTestStore()
   const [selectedProfileId, setSelectedProfileId] = useState<string>('')
 
-  const isRunning = ['running', 'preparing', 'stopping', 'ramping_up'].includes(testState)
+  const isRunning = ['running', 'preparing', 'stopping', 'ramping_up', 'ramping_down'].includes(testState)
   const isIdle = ['idle', 'completed', 'failed'].includes(testState)
 
   const duration = activeProfile?.duration_secs ?? 0

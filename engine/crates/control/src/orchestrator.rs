@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use net_meter_core::{NetworkMode, PayloadProfile, Protocol, TestConfig, TestState};
 use net_meter_generator::Generator;
@@ -283,7 +283,7 @@ impl Orchestrator {
 
             let state_clone = Arc::clone(&state);
             tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(ramp_up_secs)).await;
+                tokio::time::sleep(Duration::from_secs(ramp_up_secs)).await;
                 if *state_clone.test_state.read().await == TestState::RampingUp {
                     *state_clone.test_state.write().await = TestState::Running;
                     info!("Ramp-up complete, running at full speed");
@@ -300,7 +300,7 @@ impl Orchestrator {
             let state_clone = Arc::clone(&state);
             let duration = config.duration_secs;
             tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(duration)).await;
+                tokio::time::sleep(Duration::from_secs(duration)).await;
                 let current = *state_clone.test_state.read().await;
                 if current == TestState::Running || current == TestState::RampingUp {
                     info!("Test duration elapsed, stopping automatically");
@@ -311,13 +311,48 @@ impl Orchestrator {
         }
     }
 
-    /// 시험을 중지하고 모든 리소스를 정리한다.
+    /// 시험을 중지한다.
+    ///
+    /// `ramp_down_secs > 0`이면 RampingDown 상태를 거쳐 delay 후 실제 중지.
+    /// 이미 RampingDown이면 즉시 do_stop() 호출.
     pub async fn stop(&mut self, state: Arc<AppState>) {
         let current = *state.test_state.read().await;
-        if current == TestState::Idle || current == TestState::Completed {
+        if matches!(current, TestState::Idle | TestState::Completed | TestState::Stopping) {
             return;
         }
 
+        // 이미 RampingDown 중이면 즉시 종료
+        if current == TestState::RampingDown {
+            self.do_stop(state).await;
+            return;
+        }
+
+        let ramp_down_secs = state.active_config.read().await
+            .as_ref()
+            .map(|c| c.default_load.ramp_down_secs)
+            .unwrap_or(0);
+
+        if ramp_down_secs > 0 {
+            *state.test_state.write().await = TestState::RampingDown;
+            info!(ramp_down_secs, "Ramp-down phase starting");
+            let _ = state.event_tx.send(TestEvent::RampDownStarted { ramp_down_secs });
+
+            let state_clone = Arc::clone(&state);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(ramp_down_secs)).await;
+                if *state_clone.test_state.read().await == TestState::RampingDown {
+                    let _ = state_clone.event_tx.send(TestEvent::RampDownComplete);
+                    let mut orch = state_clone.orchestrator.lock().await;
+                    orch.do_stop(Arc::clone(&state_clone)).await;
+                }
+            });
+        } else {
+            self.do_stop(state).await;
+        }
+    }
+
+    /// 실제 종료 처리: generator/responder 중지, NS 정리, 결과 저장.
+    async fn do_stop(&mut self, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Stopping;
         info!("Stopping test");
 

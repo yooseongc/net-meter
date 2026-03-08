@@ -12,6 +12,8 @@ pub enum TestState {
     RampingUp,
     /// 시험 진행 중 (전속력)
     Running,
+    /// Ramp-down 진행 중 (부하 감소 후 종료 대기)
+    RampingDown,
     /// 중지 요청됨 (정리 중)
     Stopping,
     /// 정상 완료
@@ -33,6 +35,7 @@ impl std::fmt::Display for TestState {
             Self::Preparing => "preparing",
             Self::RampingUp => "ramping_up",
             Self::Running => "running",
+            Self::RampingDown => "ramping_down",
             Self::Stopping => "stopping",
             Self::Completed => "completed",
             Self::Failed => "failed",

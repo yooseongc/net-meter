@@ -25,7 +25,8 @@ pub async fn run(
     let num_conn = load.effective_num_connections() as usize;
     match test_type {
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
-        TestType::Cc | TestType::Bw => run_cc_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
+        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
+        TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
     }
 }
 
@@ -104,10 +105,47 @@ async fn run_cps(
 }
 
 // ---------------------------------------------------------------------------
-// CC/BW — num_conn개의 스트리밍 워커 동시 유지
+// CC — num_conn개의 연결을 유지. 데이터 교환 최소화, 연결 수 측정 집중.
 // ---------------------------------------------------------------------------
 
-async fn run_cc_bw(
+async fn run_cc(
+    addr: &str,
+    load: &LoadConfig,
+    payload: &TcpPayload,
+    num_conn: usize,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    mut shutdown: oneshot::Receiver<()>,
+    deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
+) {
+    let connect_to = load.connect_timeout();
+    let addr = addr.to_string();
+    let tx_bytes = payload.tx_bytes;
+    let rx_bytes = payload.rx_bytes;
+
+    let mut handles = Vec::with_capacity(num_conn);
+    for _ in 0..num_conn {
+        let g = Arc::clone(&global);
+        let p = Arc::clone(&proto);
+        let a = addr.clone();
+        handles.push(tokio::spawn(async move {
+            tcp_cc_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline, src_ip).await;
+        }));
+    }
+
+    tokio::select! {
+        _ = &mut shutdown => {}
+        _ = wait_deadline(deadline) => {}
+    }
+    for h in handles { h.abort(); }
+}
+
+// ---------------------------------------------------------------------------
+// BW — num_conn개의 스트리밍 워커 동시 유지 (최대 처리량)
+// ---------------------------------------------------------------------------
+
+async fn run_bw(
     addr: &str,
     load: &LoadConfig,
     payload: &TcpPayload,
@@ -129,7 +167,7 @@ async fn run_cc_bw(
         let p = Arc::clone(&proto);
         let a = addr.clone();
         handles.push(tokio::spawn(async move {
-            tcp_stream_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline, src_ip).await;
+            tcp_bw_worker(&a, tx_bytes, rx_bytes, g, p, connect_to, deadline, src_ip).await;
         }));
     }
 
@@ -235,10 +273,100 @@ async fn do_pingpong(
 }
 
 // ---------------------------------------------------------------------------
-// 스트리밍 워커 (CC/BW): connect → loop { send + recv } → deadline
+// CC 워커: connect → 연결 유지 (데이터 전송 최소화) → deadline
+//
+// payload=0 이면 순수 idle 연결 유지 (TCP_KEEPALIVE 의존).
+// payload>0 이면 connect/close 루프 대신 연결 유지하며 주기적 소량 교환.
 // ---------------------------------------------------------------------------
 
-async fn tcp_stream_worker(
+async fn tcp_cc_worker(
+    addr: &str,
+    tx_bytes: usize,
+    rx_bytes: usize,
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+    connect_timeout: Duration,
+    deadline: Option<Instant>,
+    src_ip: Option<IpAddr>,
+) {
+    loop {
+        if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+
+        record_attempt(&global, &proto);
+        let connect_start = Instant::now();
+        let stream = match timeout(connect_timeout, connect_tcp(addr, src_ip)).await {
+            Ok(Ok(s)) => {
+                let us = connect_start.elapsed().as_micros() as u64;
+                record_established(&global, &proto);
+                global.record_connect_latency(us);
+                proto.record_connect_latency(us);
+                s
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "TCP CC connect failed, retrying");
+                record_failed(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(_) => {
+                debug!("TCP CC connect timed out, retrying");
+                record_failed(&global, &proto);
+                record_timeout(&global, &proto);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+
+        // 연결 유지: payload가 없으면 순수 idle, 있으면 1초 간격으로 소량 교환
+        if tx_bytes == 0 && rx_bytes == 0 {
+            // idle 유지: 100ms 마다 deadline 체크
+            let _ = stream; // move into scope for lifetime
+            loop {
+                if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        } else {
+            let chunk = if tx_bytes > 0 { vec![0u8; tx_bytes] } else { vec![] };
+            let mut rx_buf = if rx_bytes > 0 { vec![0u8; rx_bytes.max(65536)] } else { vec![] };
+            let mut stream = stream;
+            loop {
+                if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+                let total_start = Instant::now();
+
+                if !chunk.is_empty() {
+                    if stream.write_all(&chunk).await.is_err() { break; }
+                    global.record_request(chunk.len() as u64);
+                    proto.record_request(chunk.len() as u64);
+                }
+                if !rx_buf.is_empty() {
+                    let mut received = 0usize;
+                    loop {
+                        match stream.read(&mut rx_buf[received..]).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                received += n;
+                                if received >= rx_bytes { break; }
+                            }
+                        }
+                    }
+                    let us = total_start.elapsed().as_micros() as u64;
+                    record_response(&global, &proto, 0, received as u64, us);
+                }
+
+                // CC는 1초 간격 유지 (연결 수 측정이 목적)
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+
+        record_closed(&global, &proto);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BW 워커 (구 stream_worker): connect → loop { send + recv } → deadline
+// ---------------------------------------------------------------------------
+
+async fn tcp_bw_worker(
     addr: &str,
     tx_bytes: usize,
     rx_bytes: usize,
