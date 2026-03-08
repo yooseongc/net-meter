@@ -36,7 +36,7 @@ export default function EventLog() {
                 <span className="text-muted-foreground/50 shrink-0 font-mono">{entry.ts}</span>
                 <span
                   className={cn(
-                    'shrink-0 font-semibold font-mono w-10',
+                    'shrink-0 font-semibold font-mono min-w-[3rem]',
                     entry.level === 'error' ? 'text-destructive'
                       : entry.level === 'warn' ? 'text-warning'
                       : 'text-muted-foreground',
