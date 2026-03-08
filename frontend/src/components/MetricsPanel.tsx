@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -9,6 +10,13 @@ import { useChartColors } from '../lib/theme'
 import { Card, CardContent, CardTitle } from './ui/card'
 import { cn } from '@/lib/utils'
 import { ChartKey } from './TestRunPanel'
+
+const RANGE_OPTIONS = [
+  { label: '30s', value: 30 },
+  { label: '1m', value: 60 },
+  { label: '2m', value: 120 },
+  { label: '5m', value: 300 },
+] as const
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
@@ -23,14 +31,28 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
-function CpsRpsChart({ data, targetCps }: { data: ReturnType<typeof buildChartData>; targetCps?: number }) {
+type ChartData = ReturnType<typeof buildChartData>
+
+function xAxisProps(range: number, c: ReturnType<typeof useChartColors>) {
+  return {
+    dataKey: 't' as const,
+    type: 'number' as const,
+    domain: [0, range - 1] as [number, number],
+    tickCount: 7,
+    tickFormatter: (v: number) => `${v}s`,
+    tick: { fontSize: 11, fill: c.axis },
+    allowDataOverflow: true,
+  }
+}
+
+function CpsRpsChart({ data, targetCps, range }: { data: ChartData; targetCps?: number; range: number }) {
   const c = useChartColors()
   return (
     <ChartCard title="Connections & Requests / sec">
       <ResponsiveContainer width="100%" height={160}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={c.grid} />
-          <XAxis dataKey="t" tick={{ fontSize: 11, fill: c.axis }} />
+          <XAxis {...xAxisProps(range, c)} />
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -38,15 +60,15 @@ function CpsRpsChart({ data, targetCps }: { data: ReturnType<typeof buildChartDa
             <ReferenceLine y={targetCps} stroke="var(--success)" strokeDasharray="6 3"
               label={{ value: `target ${targetCps}`, fill: 'var(--success)', fontSize: 10 }} />
           )}
-          <Line type="linear" dataKey="cps" stroke="var(--success)" dot={false} name="CPS" strokeWidth={2} />
-          <Line type="linear" dataKey="rps" stroke="var(--primary)" dot={false} name="RPS" strokeWidth={1.5} />
+          <Line type="linear" dataKey="cps" stroke="var(--success)" dot={false} name="CPS" strokeWidth={2} connectNulls={false} />
+          <Line type="linear" dataKey="rps" stroke="var(--primary)" dot={false} name="RPS" strokeWidth={1.5} connectNulls={false} />
         </LineChart>
       </ResponsiveContainer>
     </ChartCard>
   )
 }
 
-function ActiveConnChart({ data, targetCc }: { data: ReturnType<typeof buildChartData>; targetCc?: number }) {
+function ActiveConnChart({ data, targetCc, range }: { data: ChartData; targetCc?: number; range: number }) {
   const c = useChartColors()
   return (
     <ChartCard title="Active Connections">
@@ -59,7 +81,7 @@ function ActiveConnChart({ data, targetCc }: { data: ReturnType<typeof buildChar
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke={c.grid} />
-          <XAxis dataKey="t" tick={{ fontSize: 11, fill: c.axis }} />
+          <XAxis {...xAxisProps(range, c)} />
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           {targetCc != null && (
@@ -67,14 +89,14 @@ function ActiveConnChart({ data, targetCc }: { data: ReturnType<typeof buildChar
               label={{ value: `target ${targetCc}`, fill: 'var(--warning)', fontSize: 10 }} />
           )}
           <Area type="linear" dataKey="active" stroke="var(--warning)" fill="url(#activeGrad)"
-            dot={false} name="Active Conn" strokeWidth={2} />
+            dot={false} name="Active Conn" strokeWidth={2} connectNulls={false} />
         </AreaChart>
       </ResponsiveContainer>
     </ChartCard>
   )
 }
 
-function BandwidthChart({ data }: { data: ReturnType<typeof buildChartData> }) {
+function BandwidthChart({ data, range }: { data: ChartData; range: number }) {
   const c = useChartColors()
   return (
     <ChartCard title="Bandwidth (KB/s)">
@@ -91,31 +113,31 @@ function BandwidthChart({ data }: { data: ReturnType<typeof buildChartData> }) {
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke={c.grid} />
-          <XAxis dataKey="t" tick={{ fontSize: 11, fill: c.axis }} />
+          <XAxis {...xAxisProps(range, c)} />
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Area type="linear" dataKey="bwTx" stroke="var(--warning)" fill="url(#txGrad)" dot={false} name="TX KB/s" strokeWidth={1.5} />
-          <Area type="linear" dataKey="bwRx" stroke="var(--purple)" fill="url(#rxGrad)" dot={false} name="RX KB/s" strokeWidth={1.5} />
+          <Area type="linear" dataKey="bwTx" stroke="var(--warning)" fill="url(#txGrad)" dot={false} name="TX KB/s" strokeWidth={1.5} connectNulls={false} />
+          <Area type="linear" dataKey="bwRx" stroke="var(--purple)" fill="url(#rxGrad)" dot={false} name="RX KB/s" strokeWidth={1.5} connectNulls={false} />
         </AreaChart>
       </ResponsiveContainer>
     </ChartCard>
   )
 }
 
-function LatencyChart({ data }: { data: ReturnType<typeof buildChartData> }) {
+function LatencyChart({ data, range }: { data: ChartData; range: number }) {
   const c = useChartColors()
   return (
     <ChartCard title="Latency (ms)">
       <ResponsiveContainer width="100%" height={130}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={c.grid} />
-          <XAxis dataKey="t" tick={{ fontSize: 11, fill: c.axis }} />
+          <XAxis {...xAxisProps(range, c)} />
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Line type="linear" dataKey="latMean" stroke="var(--primary)" dot={false} name="mean" strokeWidth={1.5} />
-          <Line type="linear" dataKey="latP99" stroke="var(--destructive)" dot={false} name="p99" strokeWidth={1.5} />
+          <Line type="linear" dataKey="latMean" stroke="var(--primary)" dot={false} name="mean" strokeWidth={1.5} connectNulls={false} />
+          <Line type="linear" dataKey="latP99" stroke="var(--destructive)" dot={false} name="p99" strokeWidth={1.5} connectNulls={false} />
         </LineChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -223,23 +245,31 @@ function ErrorBreakdown({ snap }: { snap: MetricsSnapshot }) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function buildChartData(history: MetricsSnapshot[]) {
-  return history.map((s, i) => ({
-    t: i,
-    cps: +s.cps.toFixed(2),
-    rps: +s.rps.toFixed(2),
-    active: s.active_connections,
-    bwTx: +(s.bytes_tx_per_sec / 1024).toFixed(2),
-    bwRx: +(s.bytes_rx_per_sec / 1024).toFixed(2),
-    latMean: +s.latency_mean_ms.toFixed(2),
-    latP99: +s.latency_p99_ms.toFixed(2),
-  }))
+function buildChartData(history: MetricsSnapshot[], range: number) {
+  const slice = history.slice(-range)
+  const pad = range - slice.length
+  return Array.from({ length: range }, (_, i) => {
+    const idx = i - pad
+    if (idx < 0) return { t: i }
+    const s = slice[idx]
+    return {
+      t: i,
+      cps: +s.cps.toFixed(2),
+      rps: +s.rps.toFixed(2),
+      active: s.active_connections,
+      bwTx: +(s.bytes_tx_per_sec / 1024).toFixed(2),
+      bwRx: +(s.bytes_rx_per_sec / 1024).toFixed(2),
+      latMean: +s.latency_mean_ms.toFixed(2),
+      latP99: +s.latency_p99_ms.toFixed(2),
+    }
+  })
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<ChartKey> }) {
   const { latestSnapshot: snap, snapshotHistory: history, activeProfile: profile } = useTestStore()
+  const [chartRange, setChartRange] = useState<number>(60)
 
   if (!snap) {
     return (
@@ -251,13 +281,16 @@ export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<Cha
     )
   }
 
-  const chartData = buildChartData(history)
+  const chartData = buildChartData(history, chartRange)
   const targetCps = undefined // CPS is organic output in tight-loop mode
   const targetCc = (profile?.test_type === 'cc' || profile?.test_type === 'bw')
     ? profile.default_load.num_connections
     : undefined
   const violations = snap.threshold_violations ?? []
   const isRampingUp = snap.is_ramping_up ?? false
+
+  const hasTimeCharts = visibleCharts.has('cpsRps') || visibleCharts.has('activeConn')
+    || visibleCharts.has('bandwidth') || visibleCharts.has('latency')
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -277,19 +310,40 @@ export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<Cha
         </div>
       )}
 
+      {/* Range selector — 시계열 차트가 하나라도 보일 때만 */}
+      {hasTimeCharts && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-muted-foreground font-medium">Range</span>
+          {RANGE_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setChartRange(opt.value)}
+              className={cn(
+                'px-2 py-0.5 rounded text-[11px] font-semibold border transition-colors',
+                chartRange === opt.value
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-transparent text-muted-foreground border-border hover:text-foreground hover:border-foreground/30',
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* 차트: 1280px 이상에서 2컬럼 */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-        {chartData.length > 1 && visibleCharts.has('cpsRps') && (
-          <CpsRpsChart data={chartData} targetCps={targetCps} />
+        {visibleCharts.has('cpsRps') && (
+          <CpsRpsChart data={chartData} targetCps={targetCps} range={chartRange} />
         )}
-        {chartData.length > 1 && visibleCharts.has('activeConn') && (
-          <ActiveConnChart data={chartData} targetCc={targetCc} />
+        {visibleCharts.has('activeConn') && (
+          <ActiveConnChart data={chartData} targetCc={targetCc} range={chartRange} />
         )}
-        {chartData.length > 1 && visibleCharts.has('bandwidth') && (
-          <BandwidthChart data={chartData} />
+        {visibleCharts.has('bandwidth') && (
+          <BandwidthChart data={chartData} range={chartRange} />
         )}
-        {chartData.length > 1 && visibleCharts.has('latency') && (
-          <LatencyChart data={chartData} />
+        {visibleCharts.has('latency') && (
+          <LatencyChart data={chartData} range={chartRange} />
         )}
         {visibleCharts.has('histogram') && <LatencyHistogram snap={snap} />}
         {visibleCharts.has('errors') && <ErrorBreakdown snap={snap} />}

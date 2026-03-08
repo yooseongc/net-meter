@@ -517,6 +517,17 @@ npm run build → ✓ built in 2.41s
 
 ---
 
+## UI-4: 소규모 UX 개선 ✅
+
+| 항목 | 내용 |
+|------|------|
+| EventLog INF → INFO | 레벨 배지 `INF` → `INFO` (4글자), `w-9` → `w-10` 폭 조정 |
+| Client Workers 제거 | ClientDialog에서 "Workers (count)" 입력 제거, 테이블 Workers 컬럼 제거, `defaultClientDef` count 제거 |
+| Default Load Total Clients | 라벨을 "Total Clients"로 통일, 기본값 1 → 100, 설명 문구 개선 |
+| 차트 고정폭 + Range 선택 | 시계열 차트를 항상 고정 range 크기(기본 1분)로 표시, X축 domain 고정, 패딩으로 왼쪽 여백 확보. Range 버튼(30s/1m/2m/5m) 추가 |
+
+---
+
 ## P3: 총 클라이언트 수 기반 워커 자동 배분 (계획)
 
 **목표:** 사용자가 "전체 클라이언트 수"를 입력하면 association / CIDR 수에 따라 워커를 자동 분배

@@ -36,13 +36,13 @@ export default function EventLog() {
                 <span className="text-muted-foreground/50 shrink-0 font-mono">{entry.ts}</span>
                 <span
                   className={cn(
-                    'shrink-0 font-semibold font-mono w-9',
+                    'shrink-0 font-semibold font-mono w-10',
                     entry.level === 'error' ? 'text-destructive'
                       : entry.level === 'warn' ? 'text-warning'
                       : 'text-muted-foreground',
                   )}
                 >
-                  {entry.level === 'error' ? 'ERR' : entry.level === 'warn' ? 'WRN' : 'INF'}
+                  {entry.level === 'error' ? 'ERR' : entry.level === 'warn' ? 'WRN' : 'INFO'}
                 </span>
                 <span
                   className={cn(

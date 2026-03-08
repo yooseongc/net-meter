@@ -28,7 +28,6 @@ const defaultClientDef = (idx: number): ClientDef => ({
   id: uuidv4(),
   name: `client-${idx}`,
   cidr: `10.10.${idx + 1}.1/24`,
-  count: 1,
 })
 
 const defaultServerDef = (idx: number): ServerDef => ({
@@ -61,7 +60,7 @@ const makeDefaultConfig = (): TestConfig => {
     name: 'New Test',
     test_type: 'cps',
     duration_secs: 30,
-    default_load: { num_connections: 1, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
+    default_load: { num_connections: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
     clients: [client],
     servers: [server],
     associations: [{
@@ -129,22 +128,13 @@ function ClientDialog({ client, open, onSave, onCancel }: {
         <DialogHeader>
           <DialogTitle>Edit Client</DialogTitle>
         </DialogHeader>
-        <Row>
-          <Field label="Name">
-            <Input value={c.name} onChange={(e) => setC((p) => ({ ...p, name: e.target.value }))} />
-          </Field>
-          <Field label="Workers (count)" unit="1 IP = 1 worker">
-            <Input type="number" min={1} value={c.count ?? 1}
-              onChange={(e) => setC((p) => ({ ...p, count: Math.max(1, Number(e.target.value)) }))} />
-          </Field>
-        </Row>
+        <Field label="Name">
+          <Input value={c.name} onChange={(e) => setC((p) => ({ ...p, name: e.target.value }))} />
+        </Field>
         <Field label="CIDR" unit='e.g. "10.10.1.1/24"'>
           <Input value={c.cidr} placeholder="10.10.1.1/24"
             onChange={(e) => setC((p) => ({ ...p, cidr: e.target.value }))} />
         </Field>
-        <p className="text-[10px] text-muted-foreground/60">
-          {c.count ?? 1}개 워커 IP: {c.cidr.split('/')[0]} ~ (base+{(c.count ?? 1) - 1}), /{c.cidr.split('/')[1] ?? '24'}
-        </p>
         <div className="flex gap-2 pt-1">
           <Button onClick={() => onSave(c)} className="flex-1">Save Client</Button>
           <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
@@ -268,7 +258,7 @@ function AssociationDialog({
           <Field label="Client">
             <NativeSelect value={a.client_id} onChange={(e) => setA((p) => ({ ...p, client_id: e.target.value }))}>
               {clients.map((c) => (
-                <option key={c.id} value={c.id}>{c.name} ({c.cidr} ×{c.count ?? 1})</option>
+                <option key={c.id} value={c.id}>{c.name} ({c.cidr})</option>
               ))}
             </NativeSelect>
           </Field>
@@ -464,18 +454,7 @@ export default function TestControl() {
     setConfig((prev) => ({ ...prev, thresholds: { ...prev.thresholds, [key]: val } }))
   }
 
-  // 총 워커 수 = 모든 ClientDef.count의 합 (association 내에서 참조된 것만)
-  const referencedClientIds = new Set(config.associations.map((a) => a.client_id))
-  const totalWorkers = config.clients
-    .filter((c) => referencedClientIds.has(c.id))
-    .reduce((sum, c) => sum + (c.count ?? 1), 0)
-
-  // P3: num_connections는 이제 총량. CC/BW일 때 표시용으로만 사용.
-  const estimatedConnections = (() => {
-    const numConn = config.default_load.num_connections ?? 1
-    if (config.test_type === 'cps') return null
-    return numConn  // 총량 그대로 표시
-  })()
+  const numConnections = config.default_load.num_connections ?? 100
 
   // ─ Client handlers ─
   const handleAddClient = () => { setIsNewClient(true); setEditingClient(defaultClientDef(config.clients.length)) }
@@ -666,27 +645,17 @@ export default function TestControl() {
           {/* Default Load */}
           <Section title="Default Load" defaultOpen>
             <Field
-              label={config.test_type === 'cps' ? 'CPS: 병렬 루프 수 (총)' : 'CC·BW: 동시 연결 수 (총)'}
-              unit={config.test_type === 'cps' ? '워커 수로 자동 분배' : '워커 수로 자동 분배'}
+              label="Total Clients"
+              unit={config.test_type === 'cps' ? 'CPS: 병렬 루프 수' : 'CC·BW: 동시 연결 수'}
             >
-              <Input type="number" min={1} value={config.default_load.num_connections ?? 1}
+              <Input type="number" min={1} value={numConnections}
                 onChange={(e) => setLoadField('num_connections', e.target.value)} />
             </Field>
-            {estimatedConnections !== null && (
-              <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
-                총 동시 연결:{' '}
-                <span className="text-primary font-bold">
-                  {estimatedConnections.toLocaleString()} connections
-                </span>
-                <span className="text-muted-foreground/60 ml-1">(÷ {totalWorkers} workers = ~{Math.ceil(estimatedConnections / Math.max(totalWorkers, 1))} per worker)</span>
-              </div>
-            )}
-            {config.test_type === 'cps' && (
-              <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
-                CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복합니다.
-                CPS는 측정값으로 확인하세요.
-              </div>
-            )}
+            <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
+              {config.test_type === 'cps'
+                ? `CPS: ${numConnections.toLocaleString()}개 클라이언트가 connect→transact→close 루프를 최대 속도로 반복합니다. 실제 CPS는 측정값으로 확인하세요.`
+                : `CC·BW: ${numConnections.toLocaleString()}개 연결을 동시에 유지합니다. 각 association에 균등 분배됩니다.`}
+            </div>
             <Row>
               <Field label="Connect Timeout" unit="ms">
                 <Input type="number" value={config.default_load.connect_timeout_ms ?? 5000}
@@ -775,7 +744,6 @@ export default function TestControl() {
                   <tr className="text-muted-foreground text-[11px] border-b border-border">
                     <th className="text-left px-2 py-1.5">Name</th>
                     <th className="text-left px-2 py-1.5">CIDR</th>
-                    <th className="text-left px-2 py-1.5">Workers</th>
                     <th className="px-2 py-1.5 w-20"></th>
                   </tr>
                 </thead>
@@ -784,7 +752,6 @@ export default function TestControl() {
                     <tr key={client.id} className="border-t border-border hover:bg-muted/30 transition-colors">
                       <td className="px-2 py-1.5 font-medium text-foreground">{client.name}</td>
                       <td className="px-2 py-1.5 font-mono text-muted-foreground">{client.cidr}</td>
-                      <td className="px-2 py-1.5 text-muted-foreground">{client.count ?? 1}</td>
                       <td className="px-2 py-1.5">
                         <div className="flex gap-1">
                           <Button variant="secondary" size="xs" onClick={() => handleEditClient(client)}>
