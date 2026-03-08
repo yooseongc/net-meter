@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use net_meter_core::{LoadConfig, TcpPayload, TestType};
-use net_meter_metrics::Collector;
+use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
@@ -217,6 +217,7 @@ async fn tcp_pingpong(
         }
     };
 
+    let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
     let result = timeout(
         response_timeout,
         do_pingpong(stream, tx_bytes, rx_bytes, &global, &proto),
@@ -234,7 +235,6 @@ async fn tcp_pingpong(
             record_timeout(&global, &proto);
         }
     }
-    record_closed(&global, &proto);
 }
 
 async fn do_pingpong(
@@ -317,6 +317,7 @@ async fn tcp_cc_worker(
             }
         };
 
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         // 연결 유지: payload가 없으면 순수 idle, 있으면 1초 간격으로 소량 교환
         if tx_bytes == 0 && rx_bytes == 0 {
             // idle 유지: 100ms 마다 deadline 체크
@@ -357,8 +358,7 @@ async fn tcp_cc_worker(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
-
-        record_closed(&global, &proto);
+        // _guard drop here
     }
 }
 
@@ -404,6 +404,7 @@ async fn tcp_bw_worker(
             }
         };
 
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         let chunk = if tx_bytes > 0 { vec![0u8; tx_bytes] } else { vec![] };
         let mut rx_buf = if rx_bytes > 0 { vec![0u8; rx_bytes.max(65536)] } else { vec![] };
 
@@ -448,8 +449,7 @@ async fn tcp_bw_worker(
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
-
-        record_closed(&global, &proto);
+        // _guard drop here
     }
 }
 
@@ -481,11 +481,6 @@ fn record_timeout(g: &Collector, p: &Collector) {
     p.record_timeout();
 }
 
-#[inline]
-fn record_closed(g: &Collector, p: &Collector) {
-    g.record_connection_closed();
-    p.record_connection_closed();
-}
 
 #[inline]
 fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, latency_us: u64) {

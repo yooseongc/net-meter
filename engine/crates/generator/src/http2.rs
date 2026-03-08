@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http::{Method, Request};
 use net_meter_core::{HttpMethod, HttpPayload, LoadConfig, TestType};
-use net_meter_metrics::Collector;
+use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use rustls::ClientConfig;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
@@ -248,6 +248,7 @@ async fn single_request_h2(
         }
     };
 
+    let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
     let result = timeout(
         response_timeout,
         send_h2_stream(&send_req, host, method, path, req_body_bytes, &global, &proto),
@@ -264,7 +265,6 @@ async fn single_request_h2(
             record_timeout(&global, &proto);
         }
     }
-    record_closed(&global, &proto);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +312,7 @@ async fn h2_cc_worker(
             }
         };
 
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         loop {
             if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
@@ -335,8 +336,7 @@ async fn h2_cc_worker(
             // CC: 1초 간격 — 연결 유지가 목적
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-
-        record_closed(&global, &proto);
+        // _guard drop here
     }
 }
 
@@ -387,6 +387,7 @@ async fn connection_worker(
             }
         };
 
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         let mut stream_handles = Vec::with_capacity(concurrent_streams);
         for _ in 0..concurrent_streams {
             let sr = send_req.clone();
@@ -416,7 +417,7 @@ async fn connection_worker(
         }
 
         for h in stream_handles { let _ = h.await; }
-        record_closed(&global, &proto);
+        // _guard drop here
     }
 }
 
@@ -538,9 +539,6 @@ fn to_http_method(method: HttpMethod) -> Method {
 }
 #[inline] fn record_timeout(g: &Collector, p: &Collector) {
     g.record_timeout(); p.record_timeout();
-}
-#[inline] fn record_closed(g: &Collector, p: &Collector) {
-    g.record_connection_closed(); p.record_connection_closed();
 }
 #[inline] fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, us: u64) {
     g.record_response(status, bytes, us); p.record_response(status, bytes, us);

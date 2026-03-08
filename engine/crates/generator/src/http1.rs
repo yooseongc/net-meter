@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use net_meter_core::{HttpPayload, LoadConfig, TestType};
-use net_meter_metrics::Collector;
+use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use rustls::ClientConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpSocket, TcpStream};
@@ -252,13 +252,16 @@ async fn single_request(
             Ok(tls_stream) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
+                let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
                 global.record_connect_latency(us);
                 proto.record_connect_latency(us);
-                timeout(
+                let r = timeout(
                     response_timeout,
                     send_and_receive(tls_stream, addr, method, path, req_body_bytes, &global, &proto),
                 )
-                .await
+                .await;
+                drop(_guard);
+                r
             }
             Err(e) => {
                 debug!(addr, error = %e, "TLS handshake failed");
@@ -269,13 +272,16 @@ async fn single_request(
     } else {
         let us = connect_start.elapsed().as_micros() as u64;
         record_established(&global, &proto);
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         global.record_connect_latency(us);
         proto.record_connect_latency(us);
-        timeout(
+        let r = timeout(
             response_timeout,
             send_and_receive(tcp, addr, method, path, req_body_bytes, &global, &proto),
         )
-        .await
+        .await;
+        drop(_guard);
+        r
     };
 
     match result {
@@ -289,7 +295,6 @@ async fn single_request(
             record_timeout(&global, &proto);
         }
     }
-    record_closed(&global, &proto);
 }
 
 async fn send_and_receive<S>(
@@ -422,6 +427,8 @@ async fn cc_keep_alive_session(
             (Box::new(r) as DynReader, Box::new(w) as DynWriter)
         };
 
+        // 가드: abort/break 어느 경로로든 active_connections 감소 보장
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         let mut buffered = BufReader::new(&mut reader);
 
         loop {
@@ -453,8 +460,7 @@ async fn cc_keep_alive_session(
             // CC: 1초 간격 — 연결 유지가 목적, 처리량은 최소화
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-
-        record_closed(&global, &proto);
+        // _guard drop here → record_connection_closed()
     }
 }
 
@@ -525,6 +531,8 @@ async fn keep_alive_session(
             (Box::new(r) as DynReader, Box::new(w) as DynWriter)
         };
 
+        // 가드: abort/break 어느 경로로든 active_connections 감소 보장
+        let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
         let mut buffered = BufReader::new(&mut reader);
 
         // 동일 TCP/TLS 연결에서 keep-alive 반복 요청
@@ -554,8 +562,7 @@ async fn keep_alive_session(
                 }
             }
         }
-
-        record_closed(&global, &proto);
+        // _guard drop here → record_connection_closed()
     }
 }
 
@@ -664,9 +671,6 @@ fn build_path(base: &str, extra_bytes: Option<usize>) -> String {
 }
 #[inline] fn record_timeout(g: &Collector, p: &Collector) {
     g.record_timeout(); p.record_timeout();
-}
-#[inline] fn record_closed(g: &Collector, p: &Collector) {
-    g.record_connection_closed(); p.record_connection_closed();
 }
 #[inline] fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, us: u64) {
     g.record_response(status, bytes, us); p.record_response(status, bytes, us);

@@ -263,6 +263,29 @@ impl Collector {
     }
 }
 
+/// 활성 연결 수를 추적하는 RAII 가드.
+///
+/// `record_connection_established()` 직후 생성해 스코프에 묶어둔다.
+/// 정상 종료든 태스크 abort(future drop)든 관계없이 `record_connection_closed()`를
+/// 반드시 호출해 active_connections 카운터를 정확히 유지한다.
+pub struct ActiveConnectionGuard {
+    global: Arc<Collector>,
+    proto: Arc<Collector>,
+}
+
+impl ActiveConnectionGuard {
+    pub fn new(global: Arc<Collector>, proto: Arc<Collector>) -> Self {
+        Self { global, proto }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.global.record_connection_closed();
+        self.proto.record_connection_closed();
+    }
+}
+
 impl Default for Collector {
     fn default() -> Self {
         Arc::try_unwrap(Self::new()).unwrap_or_else(|_| panic!("arc unwrap"))
