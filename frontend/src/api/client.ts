@@ -37,15 +37,13 @@ export interface HttpPayload {
 export type PayloadProfile = TcpPayload | HttpPayload
 
 // ---------------------------------------------------------------------------
-// Load (per-client 기준)
+// Load
 // ---------------------------------------------------------------------------
 
 export interface LoadConfig {
-  /** [CPS] 클라이언트 1개당 초당 연결 수. 전체 CPS = client_count × cps_per_client */
-  cps_per_client?: number
-  /** [CC/BW] 클라이언트 1개당 동시 연결 수. 전체 CC = client_count × cc_per_client */
-  cc_per_client?: number
-  max_inflight_per_client?: number
+  /** CPS: 워커당 병렬 연결 루프 수 (기본 1 = 순차).
+   *  CC/BW: 워커당 유지할 동시 연결 수. */
+  num_connections?: number
   connect_timeout_ms?: number
   response_timeout_ms?: number
   ramp_up_secs?: number
@@ -59,24 +57,29 @@ export interface Thresholds {
 }
 
 // ---------------------------------------------------------------------------
-// 클라이언트 IP 대역
+// ClientDef: 클라이언트 IP 대역 정의
 // ---------------------------------------------------------------------------
 
-export interface ClientNet {
-  base_ip: string
-  /** 클라이언트 IP 수 (= 워커 수). undefined이면 total_clients 기준 자동 계산 */
+export interface ClientDef {
+  id: string
+  name: string
+  /** IP 대역 CIDR 표기, e.g. "10.10.1.1/24" */
+  cidr: string
+  /** 이 대역에서 사용할 워커(IP) 수. undefined이면 1 */
   count?: number
-  prefix_len?: number
 }
 
 // ---------------------------------------------------------------------------
-// 서버 엔드포인트
+// ServerDef: 서버 엔드포인트 정의
 // ---------------------------------------------------------------------------
 
-export interface ServerEndpoint {
+export interface ServerDef {
   id: string
+  name: string
   ip?: string
   port: number
+  protocol: Protocol
+  tls?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -90,19 +93,20 @@ export interface VlanConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Association (구 PairConfig)
+// Association: Client ↔ Server 트래픽 매핑
 // ---------------------------------------------------------------------------
 
 export interface Association {
   id: string
   name: string
-  client_net: ClientNet
-  server: ServerEndpoint
-  protocol: Protocol
+  /** 참조하는 ClientDef의 id */
+  client_id: string
+  /** 참조하는 ServerDef의 id */
+  server_id: string
+  /** 페이로드 설정 (ServerDef.protocol과 일치해야 함) */
   payload: PayloadProfile
-  tls?: boolean
-  load?: LoadConfig
   vlan?: VlanConfig
+  load?: LoadConfig
 }
 
 // ---------------------------------------------------------------------------
@@ -140,9 +144,9 @@ export interface TestConfig {
   name: string
   test_type: TestType
   duration_secs: number
-  /** 전체 가상 클라이언트 수. associations 간 균등 분배. 0이면 각 association의 count 사용 */
-  total_clients: number
   default_load: LoadConfig
+  clients: ClientDef[]
+  servers: ServerDef[]
   associations: Association[]
   network: NetworkConfig
   thresholds?: Thresholds

@@ -9,11 +9,11 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestType {
-    /// Connections Per Second: 초당 신규 연결 수 측정
+    /// Connections Per Second: 각 워커가 connect→transact→close 루프를 최대 속도로 반복
     Cps,
-    /// Bandwidth: 처리 대역폭 측정
+    /// Bandwidth: CC와 동일 구조, 페이로드 크기로 대역폭 결정
     Bw,
-    /// Concurrent Connections: 동시 연결 유지 측정
+    /// Concurrent Connections: num_connections 개의 연결을 동시에 유지
     Cc,
 }
 
@@ -130,28 +130,20 @@ impl PayloadProfile {
 }
 
 // ---------------------------------------------------------------------------
-// 부하 설정 (per-client 기준)
+// 부하 설정
 // ---------------------------------------------------------------------------
 
-/// 클라이언트 부하 파라미터 (클라이언트 1개 기준).
+/// 워커당 부하 파라미터.
 ///
-/// 시스템 전체 부하 = client_count × per_client 값.
-/// association이 None으로 두면 TestConfig.default_load를 사용.
+/// - CPS 모드: 워커 1개가 connect→transact→close 루프를 최대 속도로 반복.
+///   `num_connections`는 병렬 루프 수(기본 1 = 순차).
+/// - CC/BW 모드: 워커 1개가 `num_connections`개의 연결을 동시에 유지.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadConfig {
-    /// [CPS] 클라이언트 1개당 초당 연결 시도 수.
-    /// 전체 CPS = effective_client_count × cps_per_client
-    #[serde(alias = "target_cps", default)]
-    pub cps_per_client: Option<u64>,
-
-    /// [CC/BW] 클라이언트 1개당 유지할 동시 연결 수.
-    /// 전체 CC = effective_client_count × cc_per_client
-    #[serde(alias = "target_cc", default)]
-    pub cc_per_client: Option<u64>,
-
-    /// [CPS] 최대 in-flight 연결 수 (per-client). None이면 cps_per_client × 2.
-    #[serde(alias = "max_inflight", default)]
-    pub max_inflight_per_client: Option<u64>,
+    /// CPS: 워커당 병렬 연결 루프 수 (기본 1 = 순차).
+    /// CC/BW: 워커당 유지할 동시 연결 수.
+    #[serde(default)]
+    pub num_connections: Option<u64>,
 
     /// TCP 연결 타임아웃 (ms). None이면 5000.
     #[serde(default)]
@@ -161,7 +153,7 @@ pub struct LoadConfig {
     #[serde(default)]
     pub response_timeout_ms: Option<u64>,
 
-    /// 목표 CPS/CC까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.
+    /// 목표까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.
     #[serde(default)]
     pub ramp_up_secs: u64,
 }
@@ -169,9 +161,7 @@ pub struct LoadConfig {
 impl Default for LoadConfig {
     fn default() -> Self {
         Self {
-            cps_per_client: Some(100),
-            cc_per_client: None,
-            max_inflight_per_client: None,
+            num_connections: Some(1),
             connect_timeout_ms: Some(5000),
             response_timeout_ms: Some(30000),
             ramp_up_secs: 0,
@@ -180,15 +170,8 @@ impl Default for LoadConfig {
 }
 
 impl LoadConfig {
-    pub fn effective_cps(&self) -> u64 {
-        self.cps_per_client.unwrap_or(100).max(1)
-    }
-    pub fn effective_cc(&self) -> u64 {
-        self.cc_per_client.unwrap_or(50)
-    }
-    pub fn effective_max_inflight(&self) -> u64 {
-        let cps = self.effective_cps();
-        self.max_inflight_per_client.unwrap_or(cps.saturating_mul(2).min(65535))
+    pub fn effective_num_connections(&self) -> u64 {
+        self.num_connections.unwrap_or(1).max(1)
     }
     pub fn connect_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.connect_timeout_ms.unwrap_or(5000))
@@ -216,53 +199,93 @@ pub struct Thresholds {
 }
 
 // ---------------------------------------------------------------------------
-// 클라이언트 IP 대역
+// ClientDef: 클라이언트 IP 대역 정의
 // ---------------------------------------------------------------------------
 
-/// 클라이언트 IP 대역 설정.
+/// 클라이언트 IP 대역 정의.
 ///
+/// 각 ClientDef는 독립된 소스 IP 풀을 나타낸다.
 /// NS 모드: veth-c1에 IP alias로 할당.
 /// External Port 모드: client_iface에 직접 할당.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientNet {
-    /// 대역 시작 IP (e.g. "10.10.1.1")
-    pub base_ip: String,
-    /// 이 association에 할당할 클라이언트 IP 수 (= 워커 수).
-    /// None이면 total_clients / associations.len() 자동 계산.
+pub struct ClientDef {
+    /// 고유 ID
+    pub id: String,
+    /// 사람이 읽기 좋은 이름
+    pub name: String,
+    /// IP 대역 (CIDR 표기, e.g. "10.10.1.1/24").
+    /// base IP = 시작 IP, prefix_len = 서브넷 마스크 길이.
+    pub cidr: String,
+    /// 이 대역에서 사용할 워커(IP) 수. None이면 1.
     #[serde(default)]
     pub count: Option<u32>,
-    /// 서브넷 마스크 길이 (기본 24)
-    #[serde(default = "default_prefix_len")]
-    pub prefix_len: u8,
 }
 
-fn default_prefix_len() -> u8 {
-    24
+impl ClientDef {
+    /// cidr에서 (base_ip, prefix_len) 파싱.
+    pub fn parse_cidr(&self) -> Result<(std::net::Ipv4Addr, u8), String> {
+        let mut parts = self.cidr.splitn(2, '/');
+        let ip_str = parts.next().unwrap_or("");
+        let prefix = parts.next().and_then(|p| p.parse().ok()).unwrap_or(24u8);
+        let ip = ip_str
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|e| format!("Invalid CIDR '{}': {}", self.cidr, e))?;
+        Ok((ip, prefix))
+    }
+
+    pub fn effective_count(&self) -> u32 {
+        self.count.unwrap_or(1).max(1)
+    }
 }
 
-impl Default for ClientNet {
+impl Default for ClientDef {
     fn default() -> Self {
         Self {
-            base_ip: "10.10.1.1".to_string(),
-            count: None,
-            prefix_len: 24,
+            id: "client-0".to_string(),
+            name: "client-0".to_string(),
+            cidr: "10.10.1.1/24".to_string(),
+            count: Some(1),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 서버 엔드포인트
+// ServerDef: 서버 엔드포인트 정의
 // ---------------------------------------------------------------------------
 
-/// 서버 엔드포인트
+/// 서버 엔드포인트 정의.
+///
+/// 프로토콜과 TLS 설정을 포함한다.
+/// 여러 Association이 동일한 ServerDef를 참조할 수 있다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerEndpoint {
+pub struct ServerDef {
+    /// 고유 ID
     pub id: String,
+    /// 사람이 읽기 좋은 이름
+    pub name: String,
     /// 서버 IP. NS 모드: None이면 자동 할당 (10.20.1.{N}).
     /// 로컬 모드: None이면 127.0.0.1.
     #[serde(default)]
     pub ip: Option<String>,
     pub port: u16,
+    /// 사용 프로토콜
+    pub protocol: Protocol,
+    /// TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)
+    #[serde(default)]
+    pub tls: bool,
+}
+
+impl Default for ServerDef {
+    fn default() -> Self {
+        Self {
+            id: "server-0".to_string(),
+            name: "server-0".to_string(),
+            ip: None,
+            port: 8080,
+            protocol: Protocol::Http1,
+            tls: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,14 +326,13 @@ impl VlanProto {
 }
 
 // ---------------------------------------------------------------------------
-// Association (구 PairConfig)
+// Association: Client ↔ Server 트래픽 매핑
 // ---------------------------------------------------------------------------
 
-/// 하나의 클라이언트 IP 대역 ↔ 서버 엔드포인트 트래픽 설정.
+/// ClientDef와 ServerDef 간의 트래픽 매핑.
 ///
-/// 이전 버전의 PairConfig를 대체한다.
-/// 각 Association은 독립적인 클라이언트 IP 대역에서 하나의 서버를 대상으로
-/// 트래픽을 발생시킨다.
+/// Association 자체는 ID 참조만 담당하고, IP 대역/프로토콜 등의
+/// 세부 설정은 각각 ClientDef/ServerDef에 위임한다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Association {
     /// 식별자
@@ -318,24 +340,18 @@ pub struct Association {
     /// 사람이 읽기 좋은 이름
     #[serde(default)]
     pub name: String,
-    /// 클라이언트 IP 대역
-    #[serde(default)]
-    pub client_net: ClientNet,
-    /// 서버 엔드포인트
-    pub server: ServerEndpoint,
-    /// 사용할 프로토콜
-    pub protocol: Protocol,
-    /// 프로토콜별 페이로드 설정
+    /// 참조하는 ClientDef의 id
+    pub client_id: String,
+    /// 참조하는 ServerDef의 id
+    pub server_id: String,
+    /// 프로토콜별 페이로드 설정 (ServerDef.protocol과 일치해야 함)
     pub payload: PayloadProfile,
-    /// TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)
-    #[serde(default)]
-    pub tls: bool,
-    /// per-association 부하 설정. None이면 TestConfig.default_load 사용.
-    #[serde(default)]
-    pub load: Option<LoadConfig>,
     /// VLAN 설정 (선택). None이면 태그 없음.
     #[serde(default)]
     pub vlan: Option<VlanConfig>,
+    /// per-association 부하 설정 오버라이드. None이면 TestConfig.default_load 사용.
+    #[serde(default)]
+    pub load: Option<LoadConfig>,
 }
 
 impl Association {
@@ -343,23 +359,10 @@ impl Association {
     pub fn effective_load<'a>(&'a self, default: &'a LoadConfig) -> &'a LoadConfig {
         self.load.as_ref().unwrap_or(default)
     }
-
-    /// 이 association에서 사용할 클라이언트 워커 수 계산.
-    ///
-    /// 우선순위: client_net.count > total_clients 균등 분배 > 1
-    pub fn effective_client_count(&self, total_clients: u32, num_associations: usize) -> u32 {
-        if let Some(count) = self.client_net.count {
-            count.max(1)
-        } else if total_clients > 0 && num_associations > 0 {
-            (total_clients / num_associations as u32).max(1)
-        } else {
-            1
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
-// 네트워크 설정 (구 NsConfig 일반화)
+// 네트워크 설정
 // ---------------------------------------------------------------------------
 
 /// 네트워크 모드
@@ -378,7 +381,6 @@ pub enum NetworkMode {
 /// Namespace 모드 전용 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NsOptions {
-    /// 네임스페이스 이름 prefix (예: "nm" → "nm-client", "nm-server")
     #[serde(default = "default_ns_prefix")]
     pub netns_prefix: String,
 }
@@ -396,26 +398,18 @@ impl Default for NsOptions {
 /// External Port 모드 전용 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalPortOptions {
-    /// 클라이언트 측 물리 NIC 이름 (e.g. "eth1", "ens3f0")
     pub client_iface: String,
-    /// 서버 측 물리 NIC 이름 (e.g. "eth2", "ens3f1")
     pub server_iface: String,
-    /// DUT 방향 게이트웨이 IP (client 측)
     #[serde(default)]
     pub client_gateway: Option<String>,
-    /// DUT 방향 게이트웨이 MAC (client_gateway 있을 때 static ARP에 사용)
     #[serde(default)]
     pub client_gateway_mac: Option<String>,
-    /// DUT 방향 게이트웨이 IP (server 측)
     #[serde(default)]
     pub server_gateway: Option<String>,
-    /// DUT 방향 게이트웨이 MAC (server 측)
     #[serde(default)]
     pub server_gateway_mac: Option<String>,
-    /// 시험 시작 전 NIC에 기존 IP 주소를 모두 제거할지 여부
     #[serde(default)]
     pub flush_iface_addrs: bool,
-    /// 시험 종료 후 할당한 IP를 제거할지 여부 (기본 true)
     #[serde(default = "default_true")]
     pub cleanup_addrs: bool,
 }
@@ -424,19 +418,15 @@ fn default_true() -> bool {
     true
 }
 
-/// 전체 네트워크/소켓 설정 (구 NsConfig 일반화)
+/// 전체 네트워크/소켓 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    /// 네트워크 모드
     #[serde(default)]
     pub mode: NetworkMode,
-    /// Namespace 모드 전용 설정
     #[serde(default)]
     pub ns: NsOptions,
-    /// External Port 모드 전용 설정
     #[serde(default)]
     pub ext: Option<ExternalPortOptions>,
-    /// accept된 소켓에 TCP_QUICKACK 설정 (Delayed ACK 비활성화)
     #[serde(default)]
     pub tcp_quickack: bool,
 }
@@ -456,7 +446,9 @@ impl Default for NetworkConfig {
 // TestConfig — 전체 시험 설정
 // ---------------------------------------------------------------------------
 
-/// 전체 시험 설정. 하나 이상의 Association을 정의한다.
+/// 전체 시험 설정.
+///
+/// clients/servers 목록을 정의하고, associations로 연결을 매핑한다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConfig {
     /// 고유 ID (UUID v4)
@@ -467,17 +459,16 @@ pub struct TestConfig {
     pub test_type: TestType,
     /// 시험 지속 시간 (초). 0이면 수동 중지까지 계속.
     pub duration_secs: u64,
-    /// 전체 가상 클라이언트 수. associations 간 균등 분배 기본값.
-    /// 0이면 각 association의 client_net.count 사용 (없으면 1).
-    #[serde(default)]
-    pub total_clients: u32,
     /// 글로벌 기본 부하 설정 (association이 override 가능)
     pub default_load: LoadConfig,
-    /// Association 목록 (구 pairs)
-    #[serde(alias = "pairs")]
+    /// 클라이언트 IP 대역 정의 목록
+    pub clients: Vec<ClientDef>,
+    /// 서버 엔드포인트 정의 목록
+    pub servers: Vec<ServerDef>,
+    /// 클라이언트 ↔ 서버 트래픽 매핑 목록
     pub associations: Vec<Association>,
-    /// 네트워크 설정 (구 ns_config)
-    #[serde(alias = "ns_config", default)]
+    /// 네트워크 설정
+    #[serde(default)]
     pub network: NetworkConfig,
     /// 임계값 / 알람 설정
     #[serde(default)]
@@ -487,53 +478,78 @@ pub struct TestConfig {
 impl TestConfig {
     /// 단일 HTTP/1.1 association의 기본 설정
     pub fn default_single_pair() -> Self {
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let server_id = "server-0".to_string();
+        let client = ClientDef {
+            id: client_id.clone(),
+            name: "client-0".to_string(),
+            cidr: "10.10.1.1/24".to_string(),
+            count: Some(1),
+        };
+        let server = ServerDef {
+            id: server_id.clone(),
+            name: "server-0".to_string(),
+            ip: None,
+            port: 8080,
+            protocol: Protocol::Http1,
+            tls: false,
+        };
         let assoc = Association {
             id: uuid::Uuid::new_v4().to_string(),
             name: "default".to_string(),
-            client_net: ClientNet::default(),
-            server: ServerEndpoint { id: "server-0".to_string(), ip: None, port: 8080 },
-            protocol: Protocol::Http1,
+            client_id,
+            server_id,
             payload: PayloadProfile::Http(HttpPayload::default()),
-            tls: false,
-            load: None,
             vlan: None,
+            load: None,
         };
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: "Default Config".to_string(),
             test_type: TestType::Cps,
             duration_secs: 60,
-            total_clients: 0,
             default_load: LoadConfig::default(),
+            clients: vec![client],
+            servers: vec![server],
             associations: vec![assoc],
             network: NetworkConfig::default(),
             thresholds: Thresholds::default(),
         }
     }
 
-    /// 사용 중인 프로토콜 집합 반환 (메트릭 컬렉터 생성에 활용)
+    /// 사용 중인 프로토콜 집합 반환 (servers 기준)
     pub fn active_protocols(&self) -> Vec<Protocol> {
         let mut seen = std::collections::HashSet::new();
-        self.associations
+        self.servers
             .iter()
-            .filter(|a| seen.insert(a.protocol))
-            .map(|a| a.protocol)
+            .filter(|s| seen.insert(s.protocol))
+            .map(|s| s.protocol)
             .collect()
     }
 
-    /// association별 서버 주소 맵 반환 (assoc_id → "host:port")
-    /// 로컬 모드용: NS 모드에서는 오케스트레이터가 별도 계산
+    /// server_id → ServerDef 맵
+    pub fn server_map(&self) -> HashMap<String, ServerDef> {
+        self.servers.iter().map(|s| (s.id.clone(), s.clone())).collect()
+    }
+
+    /// client_id → ClientDef 맵
+    pub fn client_map(&self) -> HashMap<String, ClientDef> {
+        self.clients.iter().map(|c| (c.id.clone(), c.clone())).collect()
+    }
+
+    /// assoc_id → "host:port" 맵 (로컬 모드용)
     pub fn local_server_addrs(&self) -> HashMap<String, String> {
+        let server_map = self.server_map();
         self.associations
             .iter()
-            .map(|a| {
-                let host = a.server.ip.as_deref().unwrap_or("127.0.0.1");
-                (a.id.clone(), format!("{}:{}", host, a.server.port))
+            .filter_map(|a| {
+                let server = server_map.get(&a.server_id)?;
+                let host = server.ip.as_deref().unwrap_or("127.0.0.1");
+                Some((a.id.clone(), format!("{}:{}", host, server.port)))
             })
             .collect()
     }
 
-    /// association 수 반환
     pub fn num_associations(&self) -> usize {
         self.associations.len()
     }

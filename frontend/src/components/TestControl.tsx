@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { Save, Download, Upload, Plus, Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
 import {
   TestConfig, TestType, Protocol, HttpMethod,
-  Association, PayloadProfile, LoadConfig, NetworkConfig, NetworkMode,
+  Association, ClientDef, ServerDef,
+  PayloadProfile, LoadConfig, NetworkConfig, NetworkMode,
   TcpPayload, HttpPayload, Thresholds, VlanConfig,
 } from '../api/client'
 import { useTestStore } from '../store/testStore'
@@ -23,12 +24,26 @@ const defaultTcpPayload = (): TcpPayload => ({ type: 'tcp', tx_bytes: 64, rx_byt
 const defaultPayloadForProtocol = (proto: Protocol): PayloadProfile =>
   proto === 'tcp' ? defaultTcpPayload() : defaultHttpPayload()
 
-const defaultAssociation = (idx: number): Association => ({
+const defaultClientDef = (idx: number): ClientDef => ({
+  id: uuidv4(),
+  name: `client-${idx}`,
+  cidr: `10.10.${idx + 1}.1/24`,
+  count: 1,
+})
+
+const defaultServerDef = (idx: number): ServerDef => ({
+  id: uuidv4(),
+  name: `server-${idx}`,
+  port: 8080,
+  protocol: 'http1',
+  tls: false,
+})
+
+const defaultAssociation = (clients: ClientDef[], servers: ServerDef[], idx: number): Association => ({
   id: uuidv4(),
   name: `assoc-${idx}`,
-  client_net: { base_ip: `10.10.1.${idx + 1}`, prefix_len: 24 },
-  server: { id: `server-${idx}`, port: 8080 },
-  protocol: 'http1',
+  client_id: clients[0]?.id ?? '',
+  server_id: servers[0]?.id ?? '',
   payload: defaultHttpPayload(),
 })
 
@@ -38,17 +53,28 @@ const defaultNetworkConfig = (): NetworkConfig => ({
   tcp_quickack: false,
 })
 
-const defaultConfig = (): TestConfig => ({
-  id: uuidv4(),
-  name: 'New Test',
-  test_type: 'cps',
-  duration_secs: 30,
-  total_clients: 0,
-  default_load: { cps_per_client: 100, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
-  associations: [defaultAssociation(0)],
-  network: defaultNetworkConfig(),
-  thresholds: {},
-})
+const makeDefaultConfig = (): TestConfig => {
+  const client = defaultClientDef(0)
+  const server = defaultServerDef(0)
+  return {
+    id: uuidv4(),
+    name: 'New Test',
+    test_type: 'cps',
+    duration_secs: 30,
+    default_load: { num_connections: 1, connect_timeout_ms: 5000, response_timeout_ms: 30000, ramp_up_secs: 0 },
+    clients: [client],
+    servers: [server],
+    associations: [{
+      id: uuidv4(),
+      name: 'assoc-0',
+      client_id: client.id,
+      server_id: server.id,
+      payload: defaultHttpPayload(),
+    }],
+    network: defaultNetworkConfig(),
+    thresholds: {},
+  }
+}
 
 // ─── Form helpers ─────────────────────────────────────────────────────────────
 
@@ -88,29 +114,127 @@ function Field({ label, unit, children }: { label: string; unit?: string; childr
   )
 }
 
+// ─── ClientDef Dialog ──────────────────────────────────────────────────────────
+
+function ClientDialog({ client, open, onSave, onCancel }: {
+  client: ClientDef; open: boolean
+  onSave: (c: ClientDef) => void; onCancel: () => void
+}) {
+  const [c, setC] = useState<ClientDef>({ ...client })
+  useEffect(() => { setC({ ...client }) }, [client])
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onCancel() }}>
+      <DialogContent className="max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle>Edit Client</DialogTitle>
+        </DialogHeader>
+        <Row>
+          <Field label="Name">
+            <Input value={c.name} onChange={(e) => setC((p) => ({ ...p, name: e.target.value }))} />
+          </Field>
+          <Field label="Workers (count)" unit="1 IP = 1 worker">
+            <Input type="number" min={1} value={c.count ?? 1}
+              onChange={(e) => setC((p) => ({ ...p, count: Math.max(1, Number(e.target.value)) }))} />
+          </Field>
+        </Row>
+        <Field label="CIDR" unit='e.g. "10.10.1.1/24"'>
+          <Input value={c.cidr} placeholder="10.10.1.1/24"
+            onChange={(e) => setC((p) => ({ ...p, cidr: e.target.value }))} />
+        </Field>
+        <p className="text-[10px] text-muted-foreground/60">
+          {c.count ?? 1}개 워커 IP: {c.cidr.split('/')[0]} ~ (base+{(c.count ?? 1) - 1}), /{c.cidr.split('/')[1] ?? '24'}
+        </p>
+        <div className="flex gap-2 pt-1">
+          <Button onClick={() => onSave(c)} className="flex-1">Save Client</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ─── ServerDef Dialog ─────────────────────────────────────────────────────────
+
+function ServerDialog({ server, open, onSave, onCancel }: {
+  server: ServerDef; open: boolean
+  onSave: (s: ServerDef) => void; onCancel: () => void
+}) {
+  const [s, setS] = useState<ServerDef>({ ...server })
+  useEffect(() => { setS({ ...server }) }, [server])
+
+  const isTcp = s.protocol === 'tcp'
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onCancel() }}>
+      <DialogContent className="max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle>Edit Server</DialogTitle>
+        </DialogHeader>
+        <Row>
+          <Field label="Name">
+            <Input value={s.name} onChange={(e) => setS((p) => ({ ...p, name: e.target.value }))} />
+          </Field>
+          <Field label="Protocol">
+            <NativeSelect value={s.protocol} onChange={(e) => setS((p) => ({ ...p, protocol: e.target.value as Protocol, tls: false }))}>
+              <option value="tcp">TCP</option>
+              <option value="http1">HTTP/1.1</option>
+              <option value="http2">HTTP/2</option>
+            </NativeSelect>
+          </Field>
+        </Row>
+        <Row>
+          <Field label="Port">
+            <Input type="number" min={1} max={65535} value={s.port}
+              onChange={(e) => setS((p) => ({ ...p, port: Number(e.target.value) }))} />
+          </Field>
+          <Field label="Server IP" unit="blank=auto">
+            <Input value={s.ip ?? ''} placeholder="auto (127.0.0.1 / NS: 10.20.1.N)"
+              onChange={(e) => setS((p) => ({ ...p, ip: e.target.value || undefined }))} />
+          </Field>
+        </Row>
+        {!isTcp && (
+          <label className="flex items-center gap-2.5 text-sm cursor-pointer">
+            <Switch checked={s.tls ?? false} onCheckedChange={(v) => setS((p) => ({ ...p, tls: v }))} />
+            Enable TLS (self-signed cert)
+          </label>
+        )}
+        <div className="flex gap-2 pt-1">
+          <Button onClick={() => onSave(s)} className="flex-1">Save Server</Button>
+          <Button variant="secondary" onClick={onCancel} className="flex-1">Cancel</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ─── Association Dialog ───────────────────────────────────────────────────────
 
 function AssociationDialog({
-  assoc, open, onSave, onCancel,
+  assoc, clients, servers, open, onSave, onCancel,
 }: {
-  assoc: Association; open: boolean
-  onSave: (a: Association) => void; onCancel: () => void
+  assoc: Association; clients: ClientDef[]; servers: ServerDef[]
+  open: boolean; onSave: (a: Association) => void; onCancel: () => void
 }) {
   const [a, setA] = useState<Association>({ ...assoc })
-
   useEffect(() => { setA({ ...assoc }) }, [assoc])
 
-  const setProtocol = (proto: Protocol) =>
-    setA((prev) => ({ ...prev, protocol: proto, payload: defaultPayloadForProtocol(proto) }))
+  const selectedServer = servers.find((s) => s.id === a.server_id)
+  const isTcp = selectedServer?.protocol === 'tcp'
+
+  // Payload 업데이트: 서버 protocol 변경 시 초기화
+  const setServerId = (id: string) => {
+    const sv = servers.find((s) => s.id === id)
+    if (!sv) return
+    setA((prev) => ({
+      ...prev,
+      server_id: id,
+      payload: defaultPayloadForProtocol(sv.protocol),
+    }))
+  }
 
   const setPayloadField = (key: string, val: unknown) =>
     setA((prev) => ({ ...prev, payload: { ...prev.payload, [key]: val } as PayloadProfile }))
-
-  const setClientNetField = (key: keyof Association['client_net'], val: string | number | undefined) =>
-    setA((prev) => ({ ...prev, client_net: { ...prev.client_net, [key]: val } }))
-
-  const setServerField = (key: keyof Association['server'], val: string | number) =>
-    setA((prev) => ({ ...prev, server: { ...prev.server, [key]: val === '' ? undefined : val } }))
 
   const [useLoadOverride, setUseLoadOverride] = useState(!!a.load)
   const [loadOverride, setLoadOverride] = useState<LoadConfig>(a.load ?? {})
@@ -128,7 +252,6 @@ function AssociationDialog({
     onSave({ ...a, load: useLoadOverride ? loadOverride : undefined, vlan: useVlan ? vlan : undefined })
   }
 
-  const isTcp = a.protocol === 'tcp'
   const payload = a.payload as (TcpPayload & { type?: string }) | (HttpPayload & { type?: string })
 
   return (
@@ -138,75 +261,27 @@ function AssociationDialog({
           <DialogTitle>Edit Association</DialogTitle>
         </DialogHeader>
 
-        {/* Name & Protocol */}
         <Row>
           <Field label="Name">
-            <Input value={a.name} onChange={(e) => setA((prev) => ({ ...prev, name: e.target.value }))} />
+            <Input value={a.name} onChange={(e) => setA((p) => ({ ...p, name: e.target.value }))} />
           </Field>
-          <Field label="Protocol">
-            <NativeSelect value={a.protocol} onChange={(e) => setProtocol(e.target.value as Protocol)}>
-              <option value="tcp">TCP</option>
-              <option value="http1">HTTP/1.1</option>
-              <option value="http2">HTTP/2</option>
+          <Field label="Client">
+            <NativeSelect value={a.client_id} onChange={(e) => setA((p) => ({ ...p, client_id: e.target.value }))}>
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>{c.name} ({c.cidr} ×{c.count ?? 1})</option>
+              ))}
             </NativeSelect>
           </Field>
         </Row>
-
-        {/* Client Net */}
-        <div>
-          <div className="text-[11px] font-bold text-primary uppercase mb-2">Client IP Range</div>
-          <Row>
-            <Field label="Base IP">
-              <Input value={a.client_net.base_ip} placeholder="10.10.1.1"
-                onChange={(e) => setClientNetField('base_ip', e.target.value)} />
-            </Field>
-            <Field label="Count (workers)" unit="blank=auto">
-              <Input type="number" min={1} value={a.client_net.count ?? ''} placeholder="auto"
-                onChange={(e) => setClientNetField('count', e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)))} />
-            </Field>
-          </Row>
-          <div className="mt-2">
-            <Field label="Prefix Length" unit="/24">
-              <Input type="number" min={8} max={32} value={a.client_net.prefix_len ?? 24}
-                onChange={(e) => setClientNetField('prefix_len', Number(e.target.value))} />
-            </Field>
-          </div>
-          <p className="text-[10px] text-muted-foreground/60 mt-1">
-            {a.client_net.count
-              ? `${a.client_net.count}개 워커: ${a.client_net.base_ip} ~ (base_ip+${a.client_net.count - 1})`
-              : 'Count: total_clients / associations.len() 자동 계산'}
-          </p>
-        </div>
-
-        {/* Server */}
-        <div>
-          <div className="text-[11px] font-bold text-success uppercase mb-2">Server Endpoint</div>
-          <Row>
-            <Field label="Server ID">
-              <Input value={a.server.id} onChange={(e) => setServerField('id', e.target.value)} />
-            </Field>
-            <Field label="Port">
-              <Input type="number" value={a.server.port} onChange={(e) => setServerField('port', Number(e.target.value))} />
-            </Field>
-          </Row>
-          <div className="mt-2">
-            <Field label="Server IP" unit="blank=auto (NS: 10.20.1.N / local: 127.0.0.1)">
-              <Input value={a.server.ip ?? ''} placeholder="auto"
-                onChange={(e) => setServerField('ip', e.target.value)} />
-            </Field>
-          </div>
-        </div>
-
-        {/* TLS */}
-        {!isTcp && (
-          <label className="flex items-center gap-2.5 text-sm cursor-pointer">
-            <Switch
-              checked={a.tls ?? false}
-              onCheckedChange={(v) => setA((prev) => ({ ...prev, tls: v }))}
-            />
-            Enable TLS (self-signed cert)
-          </label>
-        )}
+        <Field label="Server">
+          <NativeSelect value={a.server_id} onChange={(e) => setServerId(e.target.value)}>
+            {servers.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} — {s.protocol.toUpperCase()}{s.tls ? '+TLS' : ''} :{s.port}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
 
         {/* Payload */}
         {isTcp ? (
@@ -254,7 +329,7 @@ function AssociationDialog({
                 <Input type="number" value={(payload as HttpPayload).path_extra_bytes ?? ''} placeholder="none"
                   onChange={(e) => setPayloadField('path_extra_bytes', e.target.value === '' ? undefined : Number(e.target.value))} />
               </Field>
-              {a.protocol === 'http2' && (
+              {selectedServer?.protocol === 'http2' && (
                 <Field label="Max Streams" unit="BW mode">
                   <Input type="number" value={(payload as HttpPayload).h2_max_concurrent_streams ?? 10}
                     onChange={(e) => setPayloadField('h2_max_concurrent_streams', Number(e.target.value))} />
@@ -302,16 +377,10 @@ function AssociationDialog({
             Override load settings for this association
           </label>
           {useLoadOverride && (
-            <Row>
-              <Field label="CPS per Client" unit="/s">
-                <Input type="number" value={loadOverride.cps_per_client ?? ''} placeholder="default"
-                  onChange={(e) => setLoadField('cps_per_client', e.target.value)} />
-              </Field>
-              <Field label="CC per Client">
-                <Input type="number" value={loadOverride.cc_per_client ?? ''} placeholder="default"
-                  onChange={(e) => setLoadField('cc_per_client', e.target.value)} />
-              </Field>
-            </Row>
+            <Field label="Connections per Worker" unit="CPS: 병렬 루프 수 / CC·BW: 동시 연결 수">
+              <Input type="number" min={1} value={loadOverride.num_connections ?? ''} placeholder="default"
+                onChange={(e) => setLoadField('num_connections', e.target.value)} />
+            </Field>
           )}
         </div>
 
@@ -329,10 +398,18 @@ function AssociationDialog({
 
 const DRAFT_KEY = 'net-meter-draft-config'
 
+function isValidConfig(c: unknown): c is TestConfig {
+  if (!c || typeof c !== 'object') return false
+  const o = c as Record<string, unknown>
+  return Array.isArray(o.clients) && Array.isArray(o.servers) && Array.isArray(o.associations)
+}
+
 function loadDraft(): TestConfig | null {
   try {
     const raw = localStorage.getItem(DRAFT_KEY)
-    return raw ? (JSON.parse(raw) as TestConfig) : null
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return isValidConfig(parsed) ? parsed : null
   } catch {
     return null
   }
@@ -342,7 +419,11 @@ function loadDraft(): TestConfig | null {
 
 export default function TestControl() {
   const { savedProfiles, saveProfile, draftConfig, setDraftConfig } = useTestStore()
-  const [config, setConfig] = useState<TestConfig>(() => loadDraft() ?? defaultConfig())
+  const [config, setConfig] = useState<TestConfig>(() => loadDraft() ?? makeDefaultConfig())
+  const [editingClient, setEditingClient] = useState<ClientDef | null>(null)
+  const [isNewClient, setIsNewClient] = useState(false)
+  const [editingServer, setEditingServer] = useState<ServerDef | null>(null)
+  const [isNewServer, setIsNewServer] = useState(false)
   const [editingAssoc, setEditingAssoc] = useState<Association | null>(null)
   const [isNewAssoc, setIsNewAssoc] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
@@ -383,28 +464,58 @@ export default function TestControl() {
     setConfig((prev) => ({ ...prev, thresholds: { ...prev.thresholds, [key]: val } }))
   }
 
-  const estimatedCps = (() => {
-    if (config.test_type !== 'cps') return null
-    const cpsPerClient = config.default_load.cps_per_client ?? 100
-    const totalClients = config.total_clients > 0
-      ? config.total_clients
-      : config.associations.reduce((sum, a) => sum + (a.client_net.count ?? 1), 0)
-    return cpsPerClient * totalClients
+  // 총 워커 수 = 모든 ClientDef.count의 합 (association 내에서 참조된 것만)
+  const referencedClientIds = new Set(config.associations.map((a) => a.client_id))
+  const totalWorkers = config.clients
+    .filter((c) => referencedClientIds.has(c.id))
+    .reduce((sum, c) => sum + (c.count ?? 1), 0)
+
+  const estimatedConnections = (() => {
+    const numConn = config.default_load.num_connections ?? 1
+    if (config.test_type === 'cps') return null  // CPS는 organic output
+    return totalWorkers * numConn
   })()
 
-  const estimatedCc = (() => {
-    if (config.test_type !== 'cc' && config.test_type !== 'bw') return null
-    const ccPerClient = config.default_load.cc_per_client ?? 50
-    const totalClients = config.total_clients > 0
-      ? config.total_clients
-      : config.associations.reduce((sum, a) => sum + (a.client_net.count ?? 1), 0)
-    return ccPerClient * totalClients
-  })()
+  // ─ Client handlers ─
+  const handleAddClient = () => { setIsNewClient(true); setEditingClient(defaultClientDef(config.clients.length)) }
+  const handleEditClient = (c: ClientDef) => { setIsNewClient(false); setEditingClient({ ...c }) }
+  const handleDeleteClient = (id: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      clients: prev.clients.filter((c) => c.id !== id),
+      associations: prev.associations.filter((a) => a.client_id !== id),
+    }))
+  }
+  const handleSaveClient = (saved: ClientDef) => {
+    setConfig((prev) => {
+      if (isNewClient) return { ...prev, clients: [...prev.clients, saved] }
+      return { ...prev, clients: prev.clients.map((c) => (c.id === saved.id ? saved : c)) }
+    })
+    setEditingClient(null)
+  }
 
+  // ─ Server handlers ─
+  const handleAddServer = () => { setIsNewServer(true); setEditingServer(defaultServerDef(config.servers.length)) }
+  const handleEditServer = (s: ServerDef) => { setIsNewServer(false); setEditingServer({ ...s }) }
+  const handleDeleteServer = (id: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      servers: prev.servers.filter((s) => s.id !== id),
+      associations: prev.associations.filter((a) => a.server_id !== id),
+    }))
+  }
+  const handleSaveServer = (saved: ServerDef) => {
+    setConfig((prev) => {
+      if (isNewServer) return { ...prev, servers: [...prev.servers, saved] }
+      return { ...prev, servers: prev.servers.map((s) => (s.id === saved.id ? saved : s)) }
+    })
+    setEditingServer(null)
+  }
+
+  // ─ Association handlers ─
   const handleAddAssoc = () => {
-    const newAssoc = defaultAssociation(config.associations.length)
     setIsNewAssoc(true)
-    setEditingAssoc(newAssoc)
+    setEditingAssoc(defaultAssociation(config.clients, config.servers, config.associations.length))
   }
   const handleEditAssoc = (assoc: Association) => { setIsNewAssoc(false); setEditingAssoc({ ...assoc }) }
   const handleDeleteAssoc = (id: string) =>
@@ -446,17 +557,44 @@ export default function TestControl() {
     e.target.value = ''
   }
 
-  const protoLabel = (p: Protocol) => p === 'tcp' ? 'TCP' : p === 'http1' ? 'HTTP/1.1' : 'HTTP/2'
-  const modeLabel = (m: NetworkMode) => m === 'loopback' ? 'Loopback' : m === 'namespace' ? 'Namespace' : 'External Port'
+  const protoLabel = (p: string) => p === 'tcp' ? 'TCP' : p === 'http1' ? 'HTTP/1.1' : 'HTTP/2'
+  const modeLabel = (m: NetworkMode) => m === 'loopback' ? 'Loopback' : m === 'namespace' ? 'Namespace' : 'Ext Port'
+
+  const clientName = (id: string) => config.clients.find((c) => c.id === id)?.name ?? id.slice(0, 8)
+  const serverName = (id: string) => {
+    const s = config.servers.find((sv) => sv.id === id)
+    return s ? `${s.name} (${protoLabel(s.protocol)}:${s.port})` : id.slice(0, 8)
+  }
 
   return (
     <>
-      <AssociationDialog
-        assoc={editingAssoc ?? defaultAssociation(0)}
-        open={!!editingAssoc}
-        onSave={handleSaveAssoc}
-        onCancel={() => setEditingAssoc(null)}
-      />
+      {/* Dialogs */}
+      {editingClient && (
+        <ClientDialog
+          client={editingClient}
+          open={!!editingClient}
+          onSave={handleSaveClient}
+          onCancel={() => setEditingClient(null)}
+        />
+      )}
+      {editingServer && (
+        <ServerDialog
+          server={editingServer}
+          open={!!editingServer}
+          onSave={handleSaveServer}
+          onCancel={() => setEditingServer(null)}
+        />
+      )}
+      {editingAssoc && (
+        <AssociationDialog
+          assoc={editingAssoc}
+          clients={config.clients}
+          servers={config.servers}
+          open={!!editingAssoc}
+          onSave={handleSaveAssoc}
+          onCancel={() => setEditingAssoc(null)}
+        />
+      )}
 
       <Card>
         <CardContent className="flex flex-col gap-3">
@@ -468,7 +606,7 @@ export default function TestControl() {
               <Button
                 variant="secondary" size="xs"
                 onClick={() => {
-                  saveProfile(config)
+                  saveProfile({ ...config, id: uuidv4() })
                   setSaveMsg('Saved!')
                   setTimeout(() => setSaveMsg(null), 2000)
                 }}
@@ -512,9 +650,9 @@ export default function TestControl() {
             <Row>
               <Field label="Test Type">
                 <NativeSelect value={config.test_type} onChange={(e) => setField('test_type', e.target.value as TestType)}>
-                  <option value="cps">CPS — Connections/s</option>
-                  <option value="cc">CC — Concurrent Connections</option>
-                  <option value="bw">BW — Bandwidth</option>
+                  <option value="cps">CPS — 연결 최대 속도</option>
+                  <option value="cc">CC — 동시 연결 유지</option>
+                  <option value="bw">BW — 대역폭 포화</option>
                 </NativeSelect>
               </Field>
               <Field label="Duration" unit="sec (0=manual)">
@@ -522,31 +660,30 @@ export default function TestControl() {
                   onChange={(e) => setField('duration_secs', Number(e.target.value))} />
               </Field>
             </Row>
-            <Field label="Total Clients" unit="0=각 association별 count 사용">
-              <Input type="number" min={0} value={config.total_clients}
-                onChange={(e) => setField('total_clients', Number(e.target.value))} />
-            </Field>
           </Section>
 
           {/* Default Load */}
-          <Section title="Default Load (per client)" defaultOpen>
-            {config.test_type === 'cps' ? (
-              <Field label="CPS per Client" unit="/s · 전체 CPS = clients × cps_per_client">
-                <Input type="number" value={config.default_load.cps_per_client ?? 100}
-                  onChange={(e) => setLoadField('cps_per_client', e.target.value)} />
-              </Field>
-            ) : (
-              <Field label="CC per Client" unit="전체 CC = clients × cc_per_client">
-                <Input type="number" value={config.default_load.cc_per_client ?? 50}
-                  onChange={(e) => setLoadField('cc_per_client', e.target.value)} />
-              </Field>
-            )}
-            {(estimatedCps !== null || estimatedCc !== null) && (
+          <Section title="Default Load" defaultOpen>
+            <Field
+              label={config.test_type === 'cps' ? 'CPS: 병렬 루프 수 / 워커' : 'CC·BW: 동시 연결 수 / 워커'}
+              unit={config.test_type === 'cps' ? '1=순차' : undefined}
+            >
+              <Input type="number" min={1} value={config.default_load.num_connections ?? 1}
+                onChange={(e) => setLoadField('num_connections', e.target.value)} />
+            </Field>
+            {estimatedConnections !== null && (
               <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
-                예상 전체 부하:{' '}
+                예상 동시 연결:{' '}
                 <span className="text-primary font-bold">
-                  {estimatedCps !== null ? `~${estimatedCps.toLocaleString()} CPS` : `~${estimatedCc?.toLocaleString()} CC`}
+                  ~{estimatedConnections.toLocaleString()} connections
                 </span>
+                <span className="text-muted-foreground/60 ml-1">({totalWorkers} workers × {config.default_load.num_connections ?? 1})</span>
+              </div>
+            )}
+            {config.test_type === 'cps' && (
+              <div className="text-xs text-muted-foreground bg-subtle rounded px-3 py-2">
+                CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복합니다.
+                CPS는 측정값으로 확인하세요.
               </div>
             )}
             <Row>
@@ -559,10 +696,6 @@ export default function TestControl() {
                   onChange={(e) => setLoadField('response_timeout_ms', e.target.value)} />
               </Field>
             </Row>
-            <Field label="Max In-flight per Client" unit="blank=auto">
-              <Input type="number" value={config.default_load.max_inflight_per_client ?? ''} placeholder="auto"
-                onChange={(e) => setLoadField('max_inflight_per_client', e.target.value)} />
-            </Field>
             <Field label="Ramp-up" unit="sec (0=off)">
               <Input type="number" value={config.default_load.ramp_up_secs ?? 0} min={0}
                 onChange={(e) => setLoadField('ramp_up_secs', e.target.value)} />
@@ -627,6 +760,93 @@ export default function TestControl() {
             </label>
           </Section>
 
+          {/* Clients */}
+          <Section title={`Clients (${config.clients.length})`} defaultOpen>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="text-muted-foreground text-[11px] border-b border-border">
+                    <th className="text-left px-2 py-1.5">Name</th>
+                    <th className="text-left px-2 py-1.5">CIDR</th>
+                    <th className="text-left px-2 py-1.5">Workers</th>
+                    <th className="px-2 py-1.5 w-20"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {config.clients.map((client) => (
+                    <tr key={client.id} className="border-t border-border hover:bg-muted/30 transition-colors">
+                      <td className="px-2 py-1.5 font-medium text-foreground">{client.name}</td>
+                      <td className="px-2 py-1.5 font-mono text-muted-foreground">{client.cidr}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{client.count ?? 1}</td>
+                      <td className="px-2 py-1.5">
+                        <div className="flex gap-1">
+                          <Button variant="secondary" size="xs" onClick={() => handleEditClient(client)}>
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                          <Button variant="destructive" size="xs"
+                            disabled={config.clients.length <= 1}
+                            onClick={() => handleDeleteClient(client.id)}>
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Button variant="secondary" size="sm" onClick={handleAddClient} className="self-start">
+              <Plus className="h-3.5 w-3.5" />
+              Add Client
+            </Button>
+          </Section>
+
+          {/* Servers */}
+          <Section title={`Servers (${config.servers.length})`} defaultOpen>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="text-muted-foreground text-[11px] border-b border-border">
+                    <th className="text-left px-2 py-1.5">Name</th>
+                    <th className="text-left px-2 py-1.5">Protocol</th>
+                    <th className="text-left px-2 py-1.5">IP:Port</th>
+                    <th className="px-2 py-1.5 w-20"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {config.servers.map((server) => (
+                    <tr key={server.id} className="border-t border-border hover:bg-muted/30 transition-colors">
+                      <td className="px-2 py-1.5 font-medium text-foreground">{server.name}</td>
+                      <td className="px-2 py-1.5 font-semibold text-primary">
+                        {protoLabel(server.protocol)}
+                        {server.tls && <Badge variant="warning" className="ml-1.5">TLS</Badge>}
+                      </td>
+                      <td className="px-2 py-1.5 text-muted-foreground font-mono">
+                        {server.ip ?? '0.0.0.0'}:{server.port}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <div className="flex gap-1">
+                          <Button variant="secondary" size="xs" onClick={() => handleEditServer(server)}>
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                          <Button variant="destructive" size="xs"
+                            disabled={config.servers.length <= 1}
+                            onClick={() => handleDeleteServer(server.id)}>
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Button variant="secondary" size="sm" onClick={handleAddServer} className="self-start">
+              <Plus className="h-3.5 w-3.5" />
+              Add Server
+            </Button>
+          </Section>
+
           {/* Associations */}
           <Section title={`Associations (${config.associations.length}) — Mode: ${modeLabel(config.network.mode)}`} defaultOpen>
             <div className="overflow-x-auto">
@@ -634,8 +854,7 @@ export default function TestControl() {
                 <thead>
                   <tr className="text-muted-foreground text-[11px] border-b border-border">
                     <th className="text-left px-2 py-1.5">Name</th>
-                    <th className="text-left px-2 py-1.5">Protocol</th>
-                    <th className="text-left px-2 py-1.5">Client Net</th>
+                    <th className="text-left px-2 py-1.5">Client</th>
                     <th className="text-left px-2 py-1.5">Server</th>
                     <th className="text-left px-2 py-1.5">Load</th>
                     <th className="px-2 py-1.5 w-20"></th>
@@ -648,18 +867,10 @@ export default function TestControl() {
                         {assoc.name || assoc.id.slice(0, 8)}
                         {assoc.vlan && <Badge variant="purple" className="ml-1.5">VLAN {assoc.vlan.outer_vid}</Badge>}
                       </td>
-                      <td className="px-2 py-1.5 font-semibold text-primary">
-                        {protoLabel(assoc.protocol)}
-                        {assoc.tls && <Badge variant="warning" className="ml-1.5">TLS</Badge>}
-                      </td>
-                      <td className="px-2 py-1.5 text-muted-foreground font-mono">
-                        {assoc.client_net.base_ip}{assoc.client_net.count ? `×${assoc.client_net.count}` : '×auto'}
-                      </td>
-                      <td className="px-2 py-1.5 text-muted-foreground">
-                        {assoc.server.id} — {assoc.server.ip ?? '0.0.0.0'}:{assoc.server.port}
-                      </td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{clientName(assoc.client_id)}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{serverName(assoc.server_id)}</td>
                       <td className="px-2 py-1.5 text-muted-foreground/50">
-                        {assoc.load ? 'custom' : 'default'}
+                        {assoc.load ? `×${assoc.load.num_connections ?? 1}` : 'default'}
                       </td>
                       <td className="px-2 py-1.5">
                         <div className="flex gap-1">
@@ -678,7 +889,8 @@ export default function TestControl() {
                 </tbody>
               </table>
             </div>
-            <Button variant="secondary" size="sm" onClick={handleAddAssoc} className="self-start">
+            <Button variant="secondary" size="sm" onClick={handleAddAssoc} className="self-start"
+              disabled={config.clients.length === 0 || config.servers.length === 0}>
               <Plus className="h-3.5 w-3.5" />
               Add Association
             </Button>

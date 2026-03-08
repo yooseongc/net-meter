@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use net_meter_core::{Association, NetMeterError};
+use net_meter_core::{Association, ClientDef, NetMeterError, ServerDef};
 use tracing::{info, warn};
 
 use crate::veth;
@@ -85,16 +85,17 @@ impl NamespaceManager {
         Ok(())
     }
 
-    /// Association 목록으로부터 클라이언트/서버 IP를 할당하고 VLAN subif를 생성한다.
+    /// ClientDef/ServerDef/Association 목록으로부터 IP를 할당하고 VLAN subif를 생성한다.
     ///
     /// # 반환값
     /// - `pair_addrs`: assoc_id → "server_ip:port" — Generator가 연결할 서버 주소
     /// - `server_binds`: server_id → "server_ip:port" — Responder가 bind할 주소
     /// - `client_ip_lists`: assoc_id → Vec<client_ip_str> — 워커별 소스 IP 목록
-    pub async fn setup_associations(
+    pub async fn setup_network(
         &self,
+        clients: &[ClientDef],
+        servers: &[ServerDef],
         associations: &[Association],
-        total_clients: u32,
     ) -> Result<
         (
             HashMap<String, String>,          // pair_addrs
@@ -103,36 +104,48 @@ impl NamespaceManager {
         ),
         NetMeterError,
     > {
-        let num_associations = associations.len();
+        let client_map: HashMap<&str, &ClientDef> =
+            clients.iter().map(|c| (c.id.as_str(), c)).collect();
+        let server_map: HashMap<&str, &ServerDef> =
+            servers.iter().map(|s| (s.id.as_str(), s)).collect();
+
         let mut server_ip_map: HashMap<String, String> = HashMap::new(); // server_id → ip
         let mut client_ip_lists: HashMap<String, Vec<String>> = HashMap::new();
         let mut next_server_ip: u8 = 1;
 
-        for assoc in associations {
-            // --- 서버 IP 할당 ---
-            let server_id = &assoc.server.id;
-            if !server_ip_map.contains_key(server_id) {
-                let ip = format!("10.20.1.{}", next_server_ip);
-                // 10.20.1.1은 setup()에서 이미 할당됨; 2번부터 alias 추가
-                if next_server_ip > 1 {
-                    let iface = "veth-s1";
-                    veth::set_ip_in_ns(&self.server_ns, iface, &ip, 24).await?;
-                    info!(server_id = %server_id, %ip, "Added server IP alias");
-                }
-                server_ip_map.insert(server_id.clone(), ip);
-                next_server_ip = next_server_ip.checked_add(1).ok_or_else(|| {
-                    NetMeterError::Namespace("Too many server endpoints (max 254)".to_string())
-                })?;
+        // --- 서버 IP 할당 (servers 목록 순서대로) ---
+        for server in servers {
+            let ip = format!("10.20.1.{}", next_server_ip);
+            // 10.20.1.1은 setup()에서 이미 할당됨; 2번부터 alias 추가
+            if next_server_ip > 1 {
+                veth::set_ip_in_ns(&self.server_ns, "veth-s1", &ip, 24).await?;
+                info!(server_id = %server.id, %ip, "Added server IP alias");
             }
+            server_ip_map.insert(server.id.clone(), ip);
+            next_server_ip = next_server_ip.checked_add(1).ok_or_else(|| {
+                NetMeterError::Namespace("Too many server endpoints (max 254)".to_string())
+            })?;
+        }
 
-            // --- 클라이언트 IP 할당 ---
-            let client_count = assoc.effective_client_count(total_clients, num_associations);
+        // --- association별 클라이언트 IP 할당 ---
+        for assoc in associations {
+            let client_def = match client_map.get(assoc.client_id.as_str()) {
+                Some(c) => c,
+                None => {
+                    return Err(NetMeterError::Namespace(format!(
+                        "ClientDef '{}' not found for association '{}'",
+                        assoc.client_id, assoc.id
+                    )));
+                }
+            };
+
+            let (base_ip, prefix_len) = client_def.parse_cidr().map_err(NetMeterError::Namespace)?;
+            let client_count = client_def.effective_count();
             let client_iface = "veth-c1";
 
             // VLAN 설정이 있으면 VLAN subif 생성 후 해당 subif에 IP 할당
             let actual_client_iface = if let Some(vlan) = &assoc.vlan {
                 let subif = if let Some(inner_vid) = vlan.inner_vid {
-                    // QinQ
                     veth::add_qinq_subif_in_ns(
                         &self.client_ns,
                         client_iface,
@@ -142,7 +155,6 @@ impl NamespaceManager {
                     )
                     .await?
                 } else {
-                    // Single tag
                     veth::add_vlan_subif_in_ns(
                         &self.client_ns,
                         client_iface,
@@ -151,11 +163,7 @@ impl NamespaceManager {
                     )
                     .await?
                 };
-                info!(
-                    assoc_id = %assoc.id,
-                    subif = %subif,
-                    "Created VLAN subif for client"
-                );
+                info!(assoc_id = %assoc.id, subif = %subif, "Created VLAN subif for client");
                 subif
             } else {
                 client_iface.to_string()
@@ -164,16 +172,16 @@ impl NamespaceManager {
             let ips = veth::assign_client_ips_in_ns(
                 &self.client_ns,
                 &actual_client_iface,
-                &assoc.client_net.base_ip,
+                &base_ip.to_string(),
                 client_count,
-                assoc.client_net.prefix_len,
+                prefix_len,
             )
             .await?;
 
             info!(
                 assoc_id = %assoc.id,
                 count = ips.len(),
-                base_ip = %assoc.client_net.base_ip,
+                cidr = %client_def.cidr,
                 "Assigned client IPs"
             );
             client_ip_lists.insert(assoc.id.clone(), ips);
@@ -182,20 +190,19 @@ impl NamespaceManager {
         // assoc_id → "server_ip:port"
         let pair_addrs: HashMap<String, String> = associations
             .iter()
-            .map(|assoc| {
-                let ip = &server_ip_map[&assoc.server.id];
-                (assoc.id.clone(), format!("{}:{}", ip, assoc.server.port))
+            .filter_map(|assoc| {
+                let server = server_map.get(assoc.server_id.as_str())?;
+                let ip = server_ip_map.get(&assoc.server_id)?;
+                Some((assoc.id.clone(), format!("{}:{}", ip, server.port)))
             })
             .collect();
 
         // server_id → "server_ip:port"
-        let server_binds: HashMap<String, String> = server_ip_map
+        let server_binds: HashMap<String, String> = server_map
             .iter()
-            .filter_map(|(server_id, ip)| {
-                associations
-                    .iter()
-                    .find(|a| &a.server.id == server_id)
-                    .map(|a| (server_id.clone(), format!("{}:{}", ip, a.server.port)))
+            .filter_map(|(server_id, server)| {
+                let ip = server_ip_map.get(*server_id)?;
+                Some((server_id.to_string(), format!("{}:{}", ip, server.port)))
             })
             .collect();
 

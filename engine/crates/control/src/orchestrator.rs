@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -34,10 +34,6 @@ impl Orchestrator {
     }
 
     /// 시험을 시작한다.
-    ///
-    /// 1. 프로토콜별 Collector 생성 및 MultiAggregator 등록
-    /// 2. TLS association 존재 시 자체 서명 인증서 생성
-    /// 3. NetworkMode에 따라 모드 분기
     pub async fn start(&mut self, config: TestConfig, state: Arc<AppState>) {
         *state.test_state.write().await = TestState::Preparing;
         *state.active_config.write().await = Some(config.clone());
@@ -64,9 +60,9 @@ impl Orchestrator {
         }
         *state.protocol_metrics.write().await = proto_collectors.clone();
 
-        // TLS association 존재 시 자체 서명 인증서 번들 생성
-        let has_tls = config.associations.iter().any(|a| {
-            a.tls && matches!(a.protocol, Protocol::Http1 | Protocol::Http2)
+        // TLS server 존재 시 자체 서명 인증서 번들 생성
+        let has_tls = config.servers.iter().any(|s| {
+            s.tls && matches!(s.protocol, Protocol::Http1 | Protocol::Http2)
         });
         let tls_bundle = if has_tls {
             match crate::tls::build() {
@@ -88,6 +84,8 @@ impl Orchestrator {
         info!(
             config_name = %config.name,
             associations = config.associations.len(),
+            servers = config.servers.len(),
+            clients = config.clients.len(),
             network_mode = ?config.network.mode,
             tls = has_tls,
             "Starting test"
@@ -150,29 +148,31 @@ impl Orchestrator {
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
         let client_tls = tls_bundle.map(|b| b.client_config);
 
-        // 고유 server_id별로 Responder 하나씩 시작
-        let mut started: HashSet<String> = HashSet::new();
-        for assoc in &config.associations {
-            if !started.insert(assoc.server.id.clone()) {
-                continue;
-            }
-            let bind_ip = assoc.server.ip.as_deref().unwrap_or("0.0.0.0");
-            let bind_addr: SocketAddr = format!("{}:{}", bind_ip, assoc.server.port)
+        // 각 ServerDef마다 Responder 시작
+        for server in &config.servers {
+            let bind_ip = server.ip.as_deref().unwrap_or("0.0.0.0");
+            let bind_addr: SocketAddr = format!("{}:{}", bind_ip, server.port)
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid server addr: {}", e))?;
 
             let proto_col = proto_collectors
-                .get(&assoc.protocol)
+                .get(&server.protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
-            let pair_server_tls = if assoc.tls { server_tls.clone() } else { None };
+            let pair_server_tls = if server.tls { server_tls.clone() } else { None };
+
+            // 이 서버를 참조하는 첫 번째 association에서 payload를 가져옴
+            let payload = config.associations.iter()
+                .find(|a| a.server_id == server.id)
+                .map(|a| a.payload.clone())
+                .unwrap_or_else(|| PayloadProfile::default_for(server.protocol));
 
             self.responder
                 .start_server(
                     bind_addr,
-                    assoc.protocol,
-                    &assoc.payload,
+                    server.protocol,
+                    &payload,
                     Arc::clone(&global),
                     proto_col,
                     tcp_quickack,
@@ -184,7 +184,6 @@ impl Orchestrator {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // 로컬 모드: client IP 바인딩 없음
         let empty_client_ips = HashMap::new();
         self.generator
             .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls, &empty_client_ips)
@@ -209,11 +208,10 @@ impl Orchestrator {
         let _ = state.event_tx.send(TestEvent::NsSetupComplete);
 
         let (pair_addrs, server_binds, client_ip_lists) = ns
-            .setup_associations(&config.associations, config.total_clients)
+            .setup_network(&config.clients, &config.servers, &config.associations)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // client_ip_lists: String → Vec<String> 파싱
         let client_ips: HashMap<String, Vec<String>> = client_ip_lists;
 
         let client_ns_name = ns.client_ns.clone();
@@ -224,37 +222,36 @@ impl Orchestrator {
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
         let client_tls = tls_bundle.map(|b| b.client_config);
 
-        // server_id → (protocol, payload, tls)
-        let mut server_proto_map: HashMap<String, (Protocol, PayloadProfile, bool)> = HashMap::new();
-        for assoc in &config.associations {
-            server_proto_map
-                .entry(assoc.server.id.clone())
-                .or_insert_with(|| (assoc.protocol, assoc.payload.clone(), assoc.tls));
-        }
+        let server_map = config.server_map();
 
         for (server_id, bind_addr_str) in &server_binds {
+            let server = match server_map.get(server_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
             let bind_addr: SocketAddr = bind_addr_str
                 .parse()
                 .map_err(|e| anyhow::anyhow!("Invalid bind addr {}: {}", bind_addr_str, e))?;
 
-            let (protocol, ref payload, pair_tls) = match server_proto_map.get(server_id) {
-                Some(v) => v.clone(),
-                None => continue,
-            };
-
             let proto_col = proto_collectors
-                .get(&protocol)
+                .get(&server.protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
-            let pair_server_tls = if pair_tls { server_tls.clone() } else { None };
+            let pair_server_tls = if server.tls { server_tls.clone() } else { None };
+
+            let payload = config.associations.iter()
+                .find(|a| &a.server_id == server_id)
+                .map(|a| a.payload.clone())
+                .unwrap_or_else(|| PayloadProfile::default_for(server.protocol));
 
             self.responder
                 .start_server_in_ns(
                     &server_ns_name,
                     bind_addr,
-                    protocol,
-                    payload,
+                    server.protocol,
+                    &payload,
                     Arc::clone(&global),
                     proto_col,
                     tcp_quickack,

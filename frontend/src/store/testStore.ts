@@ -16,10 +16,19 @@ const MAX_EVENTS = 100
 // B-1: localStorage 기반 프로파일 관리
 const PROFILES_KEY = 'net-meter-profiles'
 
+function isValidConfig(c: unknown): boolean {
+  if (!c || typeof c !== 'object') return false
+  const o = c as Record<string, unknown>
+  return Array.isArray(o.clients) && Array.isArray(o.servers) && Array.isArray(o.associations)
+}
+
 function loadProfilesFromStorage(): TestConfig[] {
   try {
     const raw = localStorage.getItem(PROFILES_KEY)
-    return raw ? (JSON.parse(raw) as TestConfig[]) : []
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(isValidConfig) as TestConfig[]
   } catch {
     return []
   }
@@ -71,7 +80,11 @@ let esInstance: EventSource | null = null
 let eventCounter = 0
 
 function makeEntry(level: EventLogEntry['level'], message: string): EventLogEntry {
-  return { id: ++eventCounter, ts: new Date().toLocaleTimeString(), level, message }
+  const d = new Date()
+  const ts = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, '0'))
+    .join(':')
+  return { id: ++eventCounter, ts, level, message }
 }
 
 function eventToEntry(ev: TestEventType): EventLogEntry {

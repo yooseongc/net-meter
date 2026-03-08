@@ -18,7 +18,11 @@
 | 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | 설계 완료, 미구현 |
 | UI-R | Frontend UI 전면 리팩터 — shadcn/ui + Tailwind CSS v4 + Dark/Light 모드 | ✅ 완료 |
 | UI-1 | UI 개선 Phase A/B/C | ✅ 완료 |
-| UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | 미구현 |
+| UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | ✅ 완료 |
+| UI-3 | 소규모 버그/UX 수정 (이벤트로그 타임스탬프, 저장 중복, 차트 선형화) | ✅ 완료 |
+| P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | 계획 |
+| P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | 계획 |
+| P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | 계획 |
 
 ---
 
@@ -500,6 +504,110 @@ npm run build → ✓ built in 2.41s
 - Generator: `bind(client_ip, 0)`, 필요 시 `SO_BINDTODEVICE`
 - Responder: `bind(server_ip, port)` (0.0.0.0 대신 특정 IP)
 - Frontend: External Port 설정 폼 + Topology 뷰 DUT 다이어그램
+
+---
+
+## UI-3: 소규모 버그/UX 수정 ✅
+
+| 항목 | 내용 |
+|------|------|
+| 이벤트로그 타임스탬프 | `new Date().toLocaleTimeString()` → 명시적 `HH:MM:SS` 포맷 (초 항상 표시) |
+| Config 저장 중복 | "Save to Profiles" 클릭 시 항상 새 UUID 생성 → 기존 항목 덮어쓰기 방지 |
+| 차트 선형화 | Recharts `type="monotone"` (베지에) → `type="linear"` (직선 보간, 실측값 정확 표시) |
+
+---
+
+## P3: 총 클라이언트 수 기반 워커 자동 배분 (계획)
+
+**목표:** 사용자가 "전체 클라이언트 수"를 입력하면 association / CIDR 수에 따라 워커를 자동 분배
+
+**현재 문제:**
+- `ClientDef.count` = "이 CIDR에서 워커 몇 개"로 직접 입력
+- CPS/CC/BW 모두 `num_connections` = "워커당 연결 수" 개념으로 노출되어 혼란
+
+**변경 방향:**
+- `TestConfig`에 `total_clients: u32` 추가 (전체 시험의 총 워커/연결 수)
+- `ClientDef.count` 제거 (또는 내부 계산용으로 숨김)
+- 배분 규칙: association이 N개이고 각 association의 client CIDR 비중에 따라 `total_clients / N` 워커 자동 할당
+- Generator `lib.rs`: `worker_count = total_clients / association_count` (나머지는 첫 번째 association에 배분)
+- UI: Default Load 섹션의 `num_connections` 레이블을 "Total Clients" 또는 "Total Connections"로 전환
+  - CPS: Total Clients = 총 병렬 루프 수 (전체 동시 connect→transact→close 루프)
+  - CC: Total Clients = 총 동시 연결 수 (전체 persistent connection 수)
+  - BW: Total Clients = 총 동시 연결 수 (각 연결에서 최대 처리량 추구)
+
+**백엔드 변경 파일:**
+- `core/src/config.rs`: `total_clients` 필드 추가, `ClientDef.count` 계산 로직 변경
+- `generator/src/lib.rs`: `worker_count` 계산 로직 변경
+
+**프론트엔드 변경 파일:**
+- `api/client.ts`: `TestConfig.total_clients` 추가
+- `TestControl.tsx`: `num_connections` → `total_clients` UI 전환, `ClientDef.count` 입력 제거
+
+---
+
+## P4: Ramp-down 지원 (계획)
+
+**목표:** 시험 종료 전 부하를 서서히 줄여 급격한 종료 방지, 실제 장비 시험에서 graceful shutdown
+
+**변경 방향:**
+
+### 백엔드
+- `LoadConfig.ramp_down_secs: u64` 추가 (기본값 0 = 비활성)
+- `TestState::RampingDown` 추가
+- Orchestrator: `duration_secs - ramp_down_secs` 시점에 `RampingDown` 상태 전환 + 이벤트 발행
+- Generator 루프: `RampingDown` 기간 동안 load scale 1.0 → 0.0 선형 감소
+  - ramp-up과 동일한 토큰 버킷 방식, 단 역방향
+  - CPS: 연결 생성 속도 감소
+  - CC/BW: 신규 요청 억제, 기존 연결은 자연 종료 대기
+- 이벤트: `RampDownStarted`, `RampDownComplete` 추가 (`control/src/event.rs`)
+
+### 프론트엔드
+- `TestControl.tsx`: Default Load 섹션에 "Ramp-down" 입력 추가 (`ramp_down_secs`)
+- `MetricsPanel.tsx`: Ramp-down 진행 배너 (주황색, ramp-up과 구분)
+- `StateBadge`: `ramping_down` 색상 추가 (주황색 계열)
+- `api/client.ts`: `LoadConfig.ramp_down_secs` 추가
+
+### 변경 파일 목록
+- `engine/crates/core/src/config.rs`
+- `engine/crates/control/src/event.rs`
+- `engine/crates/control/src/orchestrator.rs`
+- `engine/crates/generator/src/http1.rs`, `http2.rs`, `tcp.rs`
+- `frontend/src/api/client.ts`
+- `frontend/src/components/TestControl.tsx`, `MetricsPanel.tsx`
+
+---
+
+## P5: CC / BW 시험 동작 분리 (계획)
+
+**목표:** CC와 BW가 동일 로직(`run_cc_bw`)을 공유하는 문제 해결, 목적에 맞는 동작 분리
+
+**현재 문제:**
+- `http1.rs`, `http2.rs`, `tcp.rs` 모두 `TestType::Cc | TestType::Bw => run_cc_bw()`
+- 두 모드가 완전히 동일하게 동작 — 사용자가 차이를 인식 불가
+
+**CC vs BW 의도된 차이:**
+
+| 항목 | CC | BW |
+|------|----|----|
+| 목적 | 연결 유지 능력 측정 | 처리량 최대화 |
+| 연결 관리 | N개 persistent 연결 유지 | N개 persistent 연결 유지 |
+| 요청 패턴 | 연결당 1개 순차 요청, 응답 후 짧은 idle | 연결당 최대 속도 반복 (no delay) |
+| HTTP/2 스트림 | 1 stream per connection | `h2_max_concurrent_streams`까지 다중화 |
+| 페이로드 의도 | 작게 (연결 생존 측정) | 크게 (대역폭 포화) |
+| 측정 포인트 | active conn 수, latency under concurrency, 연결 유지율 | tx/rx bytes/s, goodput, CPU 사용률 |
+
+**변경 방향:**
+- `run_cc_bw()` → `run_cc()` / `run_bw()` 분리
+- CC (`run_cc`): 연결 유지 + `tokio::time::sleep(small_idle)` 또는 응답 후 idle 구간 삽입으로 "점유형" 연결 시뮬레이션
+- BW (`run_bw`): 기존 로직 유지 (최대 속도 루프) + HTTP/2에서 `h2_max_concurrent_streams` 활용
+- TCP CC: ping-pong 간격을 조절 가능하게 (`idle_ms` 필드)
+- `TcpPayload`에 `idle_ms: Option<u64>` 추가 고려
+
+**변경 파일:**
+- `engine/crates/generator/src/http1.rs`
+- `engine/crates/generator/src/http2.rs`
+- `engine/crates/generator/src/tcp.rs`
+- `engine/crates/core/src/config.rs` (TcpPayload.idle_ms 추가 시)
 
 ---
 

@@ -147,17 +147,27 @@ export default function TopologyView({ compact = false }: { compact?: boolean })
         </>
       ) : (
         <>
-          <NodeBox
-            title="Generator" subtitle="Client"
-            ip={`→ ${activeProfile?.associations[0]?.server.ip ?? '127.0.0.1'}:${activeProfile?.associations[0]?.server.port ?? 8080}`}
-            stats={clientStats} active={isRunning}
-          />
-          <Arrow animated={isRunning} label="loopback" />
-          <NodeBox
-            title="Responder" subtitle="HTTP Server"
-            ip={`0.0.0.0:${activeProfile?.associations[0]?.server.port ?? 8080}`}
-            stats={serverStats} active={isRunning}
-          />
+          {(() => {
+            const firstAssoc = activeProfile?.associations[0]
+            const firstServer = firstAssoc
+              ? activeProfile?.servers.find((s) => s.id === firstAssoc.server_id)
+              : undefined
+            return (
+              <>
+                <NodeBox
+                  title="Generator" subtitle="Client"
+                  ip={`→ ${firstServer?.ip ?? '127.0.0.1'}:${firstServer?.port ?? 8080}`}
+                  stats={clientStats} active={isRunning}
+                />
+                <Arrow animated={isRunning} label="loopback" />
+                <NodeBox
+                  title="Responder" subtitle="HTTP Server"
+                  ip={`0.0.0.0:${firstServer?.port ?? 8080}`}
+                  stats={serverStats} active={isRunning}
+                />
+              </>
+            )
+          })()}
         </>
       )}
     </div>

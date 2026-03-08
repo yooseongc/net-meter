@@ -7,8 +7,8 @@ use net_meter_metrics::Collector;
 use rustls::ClientConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::{oneshot, Semaphore};
-use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
@@ -29,10 +29,10 @@ pub async fn run(
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
 ) {
+    let num_conn = load.effective_num_connections() as usize;
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Cc => run_cc(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Bw => run_bw(addr, load, payload, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cc | TestType::Bw => run_cc_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
     }
 }
 
@@ -51,13 +51,15 @@ async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpS
 }
 
 // ---------------------------------------------------------------------------
-// CPS: interval + 세마포어 backpressure
+// CPS: rate limiter 없이 connect→transact→close를 최대 속도로 반복
+// num_conn개의 병렬 루프를 실행 (기본 1 = 순차)
 // ---------------------------------------------------------------------------
 
 async fn run_cps(
     addr: &str,
     load: &LoadConfig,
     payload: &HttpPayload,
+    num_conn: usize,
     global: Arc<Collector>,
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
@@ -65,67 +67,68 @@ async fn run_cps(
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
 ) {
-    let target_cps = load.effective_cps();
-    let max_inflight = load.effective_max_inflight() as usize;
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
-    let ramp_up_secs = load.ramp_up_secs;
-
-    let sem = Arc::new(Semaphore::new(max_inflight));
-    let tick_interval = Duration::from_secs_f64(1.0 / target_cps as f64);
-    let mut ticker = interval(tick_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
     let method = payload.method.as_str().to_string();
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
 
-    let ramp_start = Instant::now();
-    let mut token_acc: f64 = if ramp_up_secs == 0 { 1.0 } else { 0.0 };
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => break,
-            _ = ticker.tick() => {
-                if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
-
-                if ramp_up_secs > 0 {
-                    let scale = (ramp_start.elapsed().as_secs_f64() / ramp_up_secs as f64).min(1.0);
-                    token_acc = (token_acc + scale).min(1.0);
-                    if token_acc < 1.0 { continue; }
-                    token_acc -= 1.0;
-                }
-
-                let permit = match Arc::clone(&sem).try_acquire_owned() {
-                    Ok(p) => p,
-                    Err(_) => { debug!("backpressure: semaphore full"); continue; }
-                };
-
-                let g = Arc::clone(&global);
-                let p = Arc::clone(&proto);
-                let a = addr.clone();
-                let me = method.clone();
-                let pa = path.clone();
-                let tls = tls.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    single_request(&a, &me, &pa, req_body, g, p, connect_to, response_to, tls, src_ip).await;
-                });
+    if num_conn <= 1 {
+        // 단일 순차 루프
+        loop {
+            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+                break;
+            }
+            let cycle = single_request(
+                &addr, &method, &path, req_body,
+                Arc::clone(&global), Arc::clone(&proto),
+                connect_to, response_to, tls.clone(), src_ip,
+            );
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                _ = cycle => {}
             }
         }
+    } else {
+        // 병렬 루프
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut handles = Vec::with_capacity(num_conn);
+        for _ in 0..num_conn {
+            let running = Arc::clone(&running);
+            let g = Arc::clone(&global);
+            let p = Arc::clone(&proto);
+            let a = addr.clone();
+            let me = method.clone();
+            let pa = path.clone();
+            let tls = tls.clone();
+            handles.push(tokio::spawn(async move {
+                loop {
+                    if !running.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
+                    single_request(&a, &me, &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip).await;
+                }
+            }));
+        }
+        tokio::select! {
+            _ = &mut shutdown => {}
+            _ = wait_deadline(deadline) => {}
+        }
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        for h in handles { h.abort(); }
     }
 }
 
 // ---------------------------------------------------------------------------
-// CC: target_cc개 워커, keep-alive 루프
+// CC/BW: num_conn개의 keep-alive 세션을 동시에 유지
 // ---------------------------------------------------------------------------
 
-async fn run_cc(
+async fn run_cc_bw(
     addr: &str,
     load: &LoadConfig,
     payload: &HttpPayload,
+    num_conn: usize,
     global: Arc<Collector>,
     proto: Arc<Collector>,
     mut shutdown: oneshot::Receiver<()>,
@@ -133,7 +136,6 @@ async fn run_cc(
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
 ) {
-    let target_cc = load.effective_cc() as usize;
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
     let method = payload.method.as_str().to_string();
@@ -141,51 +143,8 @@ async fn run_cc(
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
 
-    let mut handles = Vec::with_capacity(target_cc);
-    for _ in 0..target_cc {
-        let g = Arc::clone(&global);
-        let p = Arc::clone(&proto);
-        let a = addr.clone();
-        let me = method.clone();
-        let pa = path.clone();
-        let tls = tls.clone();
-        handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls, src_ip).await;
-        }));
-    }
-
-    tokio::select! {
-        _ = &mut shutdown => {}
-        _ = wait_deadline(deadline) => {}
-    }
-    for h in handles { h.abort(); }
-}
-
-// ---------------------------------------------------------------------------
-// BW: 대역폭 포화 (CC와 동일 구조)
-// ---------------------------------------------------------------------------
-
-async fn run_bw(
-    addr: &str,
-    load: &LoadConfig,
-    payload: &HttpPayload,
-    global: Arc<Collector>,
-    proto: Arc<Collector>,
-    mut shutdown: oneshot::Receiver<()>,
-    deadline: Option<Instant>,
-    tls: Option<Arc<ClientConfig>>,
-    src_ip: Option<IpAddr>,
-) {
-    let concurrency = load.effective_cc() as usize;
-    let connect_to = load.connect_timeout();
-    let response_to = load.response_timeout();
-    let method = payload.method.as_str().to_string();
-    let path = build_path(&payload.path, payload.path_extra_bytes);
-    let req_body = payload.request_body_bytes.unwrap_or(0);
-    let addr = addr.to_string();
-
-    let mut handles = Vec::with_capacity(concurrency);
-    for _ in 0..concurrency {
+    let mut handles = Vec::with_capacity(num_conn);
+    for _ in 0..num_conn {
         let g = Arc::clone(&global);
         let p = Arc::clone(&proto);
         let a = addr.clone();

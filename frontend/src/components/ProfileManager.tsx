@@ -8,7 +8,7 @@ import { Badge } from './ui/badge'
 import { cn } from '@/lib/utils'
 
 function configSummary(c: TestConfig): string {
-  const protos = [...new Set(c.associations.map((a) => a.protocol.toUpperCase()))].join('/')
+  const protos = [...new Set(c.servers.map((s) => s.protocol.toUpperCase()))].join('/')
   return `${c.test_type.toUpperCase()} · ${protos} · ${c.associations.length} association(s) · ${c.duration_secs}s`
 }
 
@@ -82,20 +82,26 @@ export default function ProfileManager({ onLoadConfig }: { onLoadConfig?: (c: Te
                           </tr>
                         </thead>
                         <tbody>
-                          {c.associations.map((assoc) => (
-                            <tr key={assoc.id} className="border-b border-border/50 last:border-0">
-                              <td className="py-1.5 px-2 text-primary font-semibold">{assoc.protocol.toUpperCase()}</td>
-                              <td className="py-1.5 px-2 text-muted-foreground font-mono">
-                                {assoc.client_net.base_ip}/{assoc.client_net.prefix_len ?? 24}
-                              </td>
-                              <td className="py-1.5 px-2 text-muted-foreground">
-                                {assoc.server.ip ?? '0.0.0.0'}:{assoc.server.port}
-                              </td>
-                              <td className="py-1.5 px-2 text-muted-foreground/60">
-                                {assoc.load ? 'custom' : 'default'}
-                              </td>
-                            </tr>
-                          ))}
+                          {c.associations.map((assoc) => {
+                            const srv = c.servers.find((s) => s.id === assoc.server_id)
+                            const cli = c.clients.find((cl) => cl.id === assoc.client_id)
+                            return (
+                              <tr key={assoc.id} className="border-b border-border/50 last:border-0">
+                                <td className="py-1.5 px-2 text-primary font-semibold">
+                                  {srv?.protocol.toUpperCase() ?? '—'}
+                                </td>
+                                <td className="py-1.5 px-2 text-muted-foreground font-mono">
+                                  {cli?.cidr ?? '—'}
+                                </td>
+                                <td className="py-1.5 px-2 text-muted-foreground">
+                                  {srv ? `${srv.ip ?? '0.0.0.0'}:${srv.port}` : '—'}
+                                </td>
+                                <td className="py-1.5 px-2 text-muted-foreground/60">
+                                  {assoc.load ? 'custom' : 'default'}
+                                </td>
+                              </tr>
+                            )
+                          })}
                         </tbody>
                       </table>
 

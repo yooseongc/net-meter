@@ -41,7 +41,7 @@ function downloadCsv(results: TestResult[]) {
   ]
   const rows = results.map((r) => {
     const s = r.final_snapshot
-    const protocols = [...new Set(r.config.associations.map((a) => a.protocol))].join('/')
+    const protocols = [...new Set(r.config.servers.map((s) => s.protocol))].join('/')
     return [
       r.id, r.config.name, r.config.test_type, protocols,
       formatDate(r.started_at_secs), r.elapsed_secs,
@@ -104,7 +104,7 @@ function ResultDetail({ result }: { result: TestResult }) {
 
       <div className="text-xs text-muted-foreground/50">
         Config: {result.config.test_type.toUpperCase()} · {result.config.associations.length} association(s) ·{' '}
-        {[...new Set(result.config.associations.map((a) => a.protocol.toUpperCase()))].join('/')}
+        {[...new Set(result.config.servers.map((s) => s.protocol.toUpperCase()))].join('/')}
       </div>
     </div>
   )

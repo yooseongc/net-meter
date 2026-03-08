@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use net_meter_core::{PayloadProfile, Protocol, TestConfig, TestType};
+use net_meter_core::{PayloadProfile, Protocol, TestConfig};
 use net_meter_metrics::Collector;
 use rustls::ClientConfig;
 use tokio::sync::oneshot;
@@ -33,7 +33,7 @@ impl Generator {
     /// `pair_addrs`: assoc_id → "host:port" 맵 (오케스트레이터가 계산)
     /// `proto_collectors`: Protocol → Arc<Collector> 맵 (per-protocol 집계용)
     /// `client_ns`: Some(name)이면 해당 NS로 진입 후 실행
-    /// `tls_client_config`: TLS가 활성화된 association에서 사용할 ClientConfig
+    /// `tls_client_config`: TLS가 활성화된 server에서 사용할 ClientConfig
     /// `client_ips`: assoc_id → Vec<client_ip> — per-워커 소스 IP 목록 (비어있으면 IP 바인딩 없음)
     pub async fn start(
         &mut self,
@@ -52,9 +52,26 @@ impl Generator {
             "Generator starting all association workers"
         );
 
-        let num_associations = config.num_associations();
+        let server_map = config.server_map();
+        let client_map = config.client_map();
 
         for assoc in &config.associations {
+            let server_def = match server_map.get(&assoc.server_id) {
+                Some(s) => s.clone(),
+                None => {
+                    error!(assoc_id = %assoc.id, server_id = %assoc.server_id, "No ServerDef found, skipping");
+                    continue;
+                }
+            };
+
+            let client_def = match client_map.get(&assoc.client_id) {
+                Some(c) => c.clone(),
+                None => {
+                    error!(assoc_id = %assoc.id, client_id = %assoc.client_id, "No ClientDef found, skipping");
+                    continue;
+                }
+            };
+
             let addr = match pair_addrs.get(&assoc.id) {
                 Some(a) => a.clone(),
                 None => {
@@ -63,26 +80,27 @@ impl Generator {
                 }
             };
 
+            let protocol = server_def.protocol;
             let load = assoc.effective_load(&config.default_load).clone();
             let payload = assoc.payload.clone();
-            let protocol = assoc.protocol;
             let test_type = config.test_type;
             let duration_secs = config.duration_secs;
+
             let p = proto_collectors
                 .get(&protocol)
                 .cloned()
                 .unwrap_or_else(Collector::new);
 
-            // 워커 수 결정: per-client IP 목록이 있으면 그 수, 없으면 effective_client_count
+            // 워커 수 결정: per-client IP 목록이 있으면 그 수, 없으면 client_def.effective_count()
             let ip_list = client_ips.get(&assoc.id).cloned().unwrap_or_default();
             let worker_count = if !ip_list.is_empty() {
                 ip_list.len()
             } else {
-                assoc.effective_client_count(config.total_clients, num_associations) as usize
+                client_def.effective_count() as usize
             };
 
-            // assoc.tls가 true이고 TLS config가 있을 때만 TLS 사용
-            let pair_tls = if assoc.tls { tls_client_config.clone() } else { None };
+            // server_def.tls가 true이고 TLS config가 있을 때만 TLS 사용
+            let assoc_tls = if server_def.tls { tls_client_config.clone() } else { None };
 
             for worker_idx in 0..worker_count {
                 let g = Arc::clone(&global);
@@ -90,7 +108,7 @@ impl Generator {
                 let addr = addr.clone();
                 let load = load.clone();
                 let payload = payload.clone();
-                let tls = pair_tls.clone();
+                let tls = assoc_tls.clone();
 
                 // 이 워커에 할당된 소스 IP (없으면 None = 바인딩 안 함)
                 let src_ip: Option<IpAddr> = ip_list
@@ -152,7 +170,7 @@ impl Default for Generator {
 // ---------------------------------------------------------------------------
 
 async fn run_pair(
-    test_type: TestType,
+    test_type: net_meter_core::TestType,
     addr: &str,
     protocol: Protocol,
     payload: PayloadProfile,
@@ -173,7 +191,7 @@ async fn run_pair(
 // ---------------------------------------------------------------------------
 
 fn run_pair_in_ns(
-    test_type: TestType,
+    test_type: net_meter_core::TestType,
     addr: &str,
     protocol: Protocol,
     payload: PayloadProfile,
@@ -228,7 +246,7 @@ fn run_pair_in_ns(
 // ---------------------------------------------------------------------------
 
 async fn dispatch(
-    test_type: TestType,
+    test_type: net_meter_core::TestType,
     addr: &str,
     protocol: Protocol,
     payload: &PayloadProfile,

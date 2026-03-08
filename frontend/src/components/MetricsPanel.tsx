@@ -38,8 +38,8 @@ function CpsRpsChart({ data, targetCps }: { data: ReturnType<typeof buildChartDa
             <ReferenceLine y={targetCps} stroke="var(--success)" strokeDasharray="6 3"
               label={{ value: `target ${targetCps}`, fill: 'var(--success)', fontSize: 10 }} />
           )}
-          <Line type="monotone" dataKey="cps" stroke="var(--success)" dot={false} name="CPS" strokeWidth={2} />
-          <Line type="monotone" dataKey="rps" stroke="var(--primary)" dot={false} name="RPS" strokeWidth={1.5} />
+          <Line type="linear" dataKey="cps" stroke="var(--success)" dot={false} name="CPS" strokeWidth={2} />
+          <Line type="linear" dataKey="rps" stroke="var(--primary)" dot={false} name="RPS" strokeWidth={1.5} />
         </LineChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -66,7 +66,7 @@ function ActiveConnChart({ data, targetCc }: { data: ReturnType<typeof buildChar
             <ReferenceLine y={targetCc} stroke="var(--warning)" strokeDasharray="6 3"
               label={{ value: `target ${targetCc}`, fill: 'var(--warning)', fontSize: 10 }} />
           )}
-          <Area type="monotone" dataKey="active" stroke="var(--warning)" fill="url(#activeGrad)"
+          <Area type="linear" dataKey="active" stroke="var(--warning)" fill="url(#activeGrad)"
             dot={false} name="Active Conn" strokeWidth={2} />
         </AreaChart>
       </ResponsiveContainer>
@@ -95,8 +95,8 @@ function BandwidthChart({ data }: { data: ReturnType<typeof buildChartData> }) {
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Area type="monotone" dataKey="bwTx" stroke="var(--warning)" fill="url(#txGrad)" dot={false} name="TX KB/s" strokeWidth={1.5} />
-          <Area type="monotone" dataKey="bwRx" stroke="var(--purple)" fill="url(#rxGrad)" dot={false} name="RX KB/s" strokeWidth={1.5} />
+          <Area type="linear" dataKey="bwTx" stroke="var(--warning)" fill="url(#txGrad)" dot={false} name="TX KB/s" strokeWidth={1.5} />
+          <Area type="linear" dataKey="bwRx" stroke="var(--purple)" fill="url(#rxGrad)" dot={false} name="RX KB/s" strokeWidth={1.5} />
         </AreaChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -114,8 +114,8 @@ function LatencyChart({ data }: { data: ReturnType<typeof buildChartData> }) {
           <YAxis tick={{ fontSize: 11, fill: c.axis }} />
           <Tooltip contentStyle={{ background: c.tooltipBg, border: `1px solid ${c.tooltipBorder}`, fontSize: 12, color: c.tooltipColor }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Line type="monotone" dataKey="latMean" stroke="var(--primary)" dot={false} name="mean" strokeWidth={1.5} />
-          <Line type="monotone" dataKey="latP99" stroke="var(--destructive)" dot={false} name="p99" strokeWidth={1.5} />
+          <Line type="linear" dataKey="latMean" stroke="var(--primary)" dot={false} name="mean" strokeWidth={1.5} />
+          <Line type="linear" dataKey="latP99" stroke="var(--destructive)" dot={false} name="p99" strokeWidth={1.5} />
         </LineChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -252,8 +252,10 @@ export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<Cha
   }
 
   const chartData = buildChartData(history)
-  const targetCps = profile?.test_type === 'cps' ? profile.default_load.cps_per_client : undefined
-  const targetCc = profile?.default_load.cc_per_client
+  const targetCps = undefined // CPS is organic output in tight-loop mode
+  const targetCc = (profile?.test_type === 'cc' || profile?.test_type === 'bw')
+    ? profile.default_load.num_connections
+    : undefined
   const violations = snap.threshold_violations ?? []
   const isRampingUp = snap.is_ramping_up ?? false
 
