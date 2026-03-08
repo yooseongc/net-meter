@@ -79,6 +79,7 @@ pub struct MetricsSnapshot {
     // --- 서버 사이드 계측 (Responder 집계) ---
     pub server_requests: u64,
     pub server_bytes_tx: u64,
+    pub server_bytes_rx: u64,
 
     // --- Latency 히스토그램 버킷 (누적, Prometheus le 스타일) ---
     /// 버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf]

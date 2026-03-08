@@ -64,11 +64,16 @@ async fn handle_conn(
                     Err(_) => return,
                 }
             }
+            global.record_server_rx(received as u64);
+            proto.record_server_rx(received as u64);
         } else {
             // 길이 미지정: 데이터가 올 때마다 한 청크 읽기
             match stream.read(&mut buf).await {
                 Ok(0) => return,
-                Ok(_) => {}
+                Ok(n) => {
+                    global.record_server_rx(n as u64);
+                    proto.record_server_rx(n as u64);
+                }
                 Err(_) => return,
             }
         }

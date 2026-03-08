@@ -44,6 +44,7 @@ pub struct Collector {
     // 서버 사이드 (Responder)
     pub server_requests: AtomicU64,
     pub server_bytes_tx: AtomicU64,
+    pub server_bytes_rx: AtomicU64,
 
     // Latency histograms (microseconds)
     /// 전체 요청 latency (connect + send + recv)
@@ -75,6 +76,7 @@ impl Collector {
             bytes_rx: AtomicU64::new(0),
             server_requests: AtomicU64::new(0),
             server_bytes_tx: AtomicU64::new(0),
+            server_bytes_rx: AtomicU64::new(0),
             latency_hist: Mutex::new(new_hist()),
             connect_hist: Mutex::new(new_hist()),
             ttfb_hist: Mutex::new(new_hist()),
@@ -141,6 +143,12 @@ impl Collector {
         self.server_bytes_tx.fetch_add(bytes_tx, Ordering::Relaxed);
     }
 
+    /// 서버가 클라이언트로부터 수신한 바이트 기록 (요청 본문 등)
+    #[inline]
+    pub fn record_server_rx(&self, bytes: u64) {
+        self.server_bytes_rx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// 응답 완료 기록. latency_us는 연결 시작부터 응답 완료까지의 전체 시간.
     #[inline]
     pub fn record_response(&self, status: u16, bytes: u64, latency_us: u64) {
@@ -190,6 +198,7 @@ impl Collector {
             bytes_rx_total: self.bytes_rx.load(Ordering::Relaxed),
             server_requests: self.server_requests.load(Ordering::Relaxed),
             server_bytes_tx: self.server_bytes_tx.load(Ordering::Relaxed),
+            server_bytes_rx: self.server_bytes_rx.load(Ordering::Relaxed),
             latency_mean_ms: lat_mean,
             latency_p50_ms: lat_p50,
             latency_p95_ms: lat_p95,
@@ -235,6 +244,7 @@ impl Collector {
             &self.bytes_rx,
             &self.server_requests,
             &self.server_bytes_tx,
+            &self.server_bytes_rx,
         ] {
             counter.store(0, Ordering::Relaxed);
         }

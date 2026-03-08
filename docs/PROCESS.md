@@ -16,6 +16,42 @@
 | 9 | ~~eBPF/XDP 옵션~~ | 취소 |
 | 10 | Association 기반 설정 전환 + VLAN 지원 | ✅ 완료 |
 | 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | 설계 완료, 미구현 |
+| UI-R | Frontend UI 전면 리팩터 — shadcn/ui + Tailwind CSS v4 + Dark/Light 모드 | ✅ 완료 |
+| UI-1 | UI 개선 Phase A/B/C | ✅ 완료 |
+| UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | 미구현 |
+
+---
+
+## UI 개선 계획 (UI-1 / UI-2)
+
+### Phase A — 레이아웃·UX (프론트엔드 전용)
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| A-1 | Sidebar → 상단 탭 바 전환. Header 아래 Monitor/Config/Topology/Profiles/Results 탭. 사이드바의 시험 상태 위젯은 Header 우측에 컴팩트 형태로 통합 | ✅ |
+| A-2 | 전체 패딩·여백 개선: 카드 내부, 버튼, 입력 필드, 테이블 행 높이, 섹션 간격 상향 | ✅ |
+| A-3 | Display 차트 선택 UI: checkbox → Toggle Button Group (pill 형태, active 시 색상 반전) | ✅ |
+| A-4 | Config 탭에서 Start/Stop 버튼 제거 — 시험 제어는 Monitor 탭에서만 | ✅ |
+
+### Phase B — 데이터 관리 (프론트엔드)
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| B-1 | Config 프로파일을 localStorage로 저장/불러오기. 키: `net-meter-profiles`. 백엔드 `/api/profiles` 미사용 | ✅ |
+| B-2 | Config 자동 저장 — 편집 중 debounce(500ms) 후 `net-meter-draft-config` 키로 localStorage 저장. 앱 재진입 시 복원 | ✅ |
+
+### Phase C — 버그 수정
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| C-1 | failed/completed 상태 진입 후 타이머 정지 및 정리. WS 스냅샷마다 `fetchStatus()` 호출을 active 상태(`preparing/ramping_up/running/stopping`)일 때만 수행. SSE `error` 이벤트 → `fetchStatus()` 추가. failed 진입 시 3초 후 snapshotHistory 정리 | ✅ |
+
+### Phase D — 데이터 구조 변경 (FE + BE, 미구현)
+
+| 항목 | 내용 |
+|------|------|
+| D-1 | Client/Server 설정 분리 + Association은 매핑만. `ClientDef { id, name, cidr }` / `ServerDef { id, name, ip, port, protocol, reuseaddr }` / `Association { client_id, server_id, payload, tls, vlan, load }`. Config 탭에 Clients / Servers / Associations 3개 서브섹션 |
+| D-2 | CPS/CC/BW 개념 수정. 각 client worker는 세션/트랜잭션 완료 즉시 다음 실행(rate limiter 없음). `cps_per_client`/`cc_per_client` 제거 → `num_connections`(CC/BW용 동시 연결 수)로 대체. Generator 루프 로직 변경 필요 |
 
 ---
 
@@ -407,6 +443,40 @@ ip link add link veth-c1.100 name veth-c1.100.200 type vlan id 200 proto 802.1Q
 ```
 cargo check → Finished `dev` profile in 3.86s
 npm run build → ✓ built in 2.63s
+```
+
+---
+
+## P2: UI 개선 ✅
+
+**목표:** Avalanche 수준 UI 완성도
+
+**달성 사항:**
+
+### 1. 좌측 사이드바 내비게이션
+- [x] 헤더: 로고 + 글로벌 컨트롤(Stop, 알람, WS)만 유지
+- [x] 좌측 사이드바 (160px): 세로 탭 (Monitor/Config/Topology/Profiles/Results) + 시험 상태 정보 (배지, 경과시간, progress bar)
+- [x] 메인 영역: flex-grow
+- [x] 1600px+: Dashboard 3단 (TestRunPanel | MetricsPanel | EventLog) — `useWide(1600)` 훅
+
+### 2. 결과 비교 뷰
+- [x] Results 탭 각 행에 체크박스 추가 (최대 2개)
+- [x] 선택된 2개에 "Compare Selected" 버튼 표시
+- [x] ResultCompare 컴포넌트: 나란히 테이블 + DeltaCell (Δ값 + % 증감률, 개선/악화 색상)
+- [x] 비교 지표: CPS/RPS/성공률/ActiveConn/p50/p99/TTFB/Connect/TX/RX/연결수/실패수
+
+### 3. 서버 사이드 RX 지표
+- [x] `core/src/snapshot.rs`: `server_bytes_rx: u64` 추가
+- [x] `metrics/src/collector.rs`: `server_bytes_rx: AtomicU64`, `record_server_rx()` 메서드 추가
+- [x] `responder/src/tcp.rs`: 루프 내 read 성공 후 `record_server_rx()` 호출
+- [x] `responder/src/lib.rs`: `handle_http`에서 Content-Length 헤더 기반 수신 bytes 기록
+- [x] `api/client.ts`: `MetricsSnapshot.server_bytes_rx: number` 추가
+- [x] `TopologyView.tsx`: Server 노드에 "Srv RX" MB 표시
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 1.89s
+npm run build → ✓ built in 2.41s
 ```
 
 ---

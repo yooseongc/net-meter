@@ -1,12 +1,23 @@
 import { useEffect, useState } from 'react'
+import { Sun, Moon, Monitor, Wifi, WifiOff, Square, TriangleAlert } from 'lucide-react'
 import { useTestStore } from './store/testStore'
+import { useTheme } from './lib/theme'
+import { cn } from './lib/utils'
+import { Button } from './components/ui/button'
+import { Badge } from './components/ui/badge'
 import Dashboard from './components/Dashboard'
 import TestControl from './components/TestControl'
-import TopologyView from './components/TopologyView'
 import ProfileManager from './components/ProfileManager'
 import Results from './components/Results'
 
-type Tab = 'monitor' | 'config' | 'topology' | 'profiles' | 'results'
+type Tab = 'monitor' | 'config' | 'profiles' | 'results'
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'monitor',  label: 'Monitor'  },
+  { id: 'config',   label: 'Config'   },
+  { id: 'profiles', label: 'Profiles' },
+  { id: 'results',  label: 'Results'  },
+]
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('monitor')
@@ -25,233 +36,180 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      <Header tab={tab} setTab={setTab} />
-      <main style={styles.main}>
-        {tab === 'monitor' && <Dashboard />}
-        {/* TestControl은 항상 마운트 상태로 유지하여 탭 전환 시 설정이 유실되지 않도록 한다 */}
-        <div style={{ display: tab === 'config' ? 'block' : 'none' }}>
-          <TestControl />
+    <div className="flex flex-col min-h-screen bg-background text-foreground">
+      {/* ── 헤더 ── */}
+      <Header onStop={() => {}} />
+
+      {/* ── 탭 바 ── */}
+      <div className="bg-header border-b border-border flex-shrink-0">
+        <div className="flex px-4">
+          {TABS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={cn(
+                'px-6 py-3 text-sm font-medium border-b-2 transition-colors focus:outline-none',
+                tab === id
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {label}
+            </button>
+          ))}
         </div>
-        {tab === 'topology' && <TopologyView />}
-        {tab === 'profiles' && <ProfileManager onLoadConfig={handleLoadConfig} />}
-        {tab === 'results' && <Results />}
+      </div>
+
+      {/* ── 콘텐츠 ── */}
+      <main className="flex-1 overflow-y-auto">
+        <div className="p-6 max-w-[1600px] mx-auto w-full">
+          {tab === 'monitor' && <Dashboard />}
+          {/* TestControl은 항상 마운트 상태 유지 (자동저장 + 상태 보존) */}
+          <div style={{ display: tab === 'config' ? 'block' : 'none' }}>
+            <TestControl />
+          </div>
+          {tab === 'profiles' && <ProfileManager onLoadConfig={handleLoadConfig} />}
+          {tab === 'results' && <Results />}
+        </div>
       </main>
     </div>
   )
 }
 
-function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
-  const { testState, activeProfile, elapsedSecs, stopTest, wsConnected } =
-    useTestStore()
+// ─── 헤더 ────────────────────────────────────────────────────────────────────
 
-  const isRunning =
-    testState === 'running' || testState === 'preparing' || testState === 'stopping' || testState === 'ramping_up'
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme()
+  const next: typeof theme = theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark'
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={() => setTheme(next)}
+      title={`Current theme: ${theme}`}
+      className="h-9 w-9 text-muted-foreground hover:text-foreground"
+    >
+      {theme === 'dark'   ? <Moon className="h-4 w-4" />
+        : theme === 'light' ? <Sun className="h-4 w-4" />
+        : <Monitor className="h-4 w-4" />}
+    </Button>
+  )
+}
 
-  const { latestSnapshot, eventLog } = useTestStore()
+// 시험 실행 중 헤더에 표시되는 컴팩트 상태 위젯
+function ActiveTestStatus() {
+  const { testState, activeProfile, elapsedSecs } = useTestStore()
+  const isActive = ACTIVE_STATES.includes(testState)
+  if (!isActive && testState !== 'completed' && testState !== 'failed') return null
+  if (!activeProfile) return null
+
+  const duration = activeProfile.duration_secs
+  const elapsed = elapsedSecs ?? 0
+  const remaining = duration > 0 ? Math.max(0, duration - elapsed) : null
+  const progress = duration > 0 ? Math.min(100, (elapsed / duration) * 100) : 0
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-muted border border-border text-sm max-w-[460px]">
+      <StateBadge state={testState} />
+      <span className="font-medium truncate max-w-[140px] text-foreground">{activeProfile.name}</span>
+      <span className="font-mono text-foreground tabular-nums">{formatTime(elapsed)}</span>
+      {remaining != null && (
+        <span className="font-mono text-muted-foreground tabular-nums">-{formatTime(remaining)}</span>
+      )}
+      {duration > 0 && (
+        <div className="w-20 h-1.5 bg-border rounded-full overflow-hidden shrink-0">
+          <div
+            className={cn(
+              'h-full rounded-full transition-[width] duration-500 ease-linear',
+              isActive ? 'bg-success' : 'bg-muted-foreground',
+            )}
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ACTIVE_STATES = ['preparing', 'ramping_up', 'running', 'stopping']
+
+function Header({ onStop: _onStop }: { onStop: () => void }) {
+  const { testState, stopTest, wsConnected, latestSnapshot, eventLog } = useTestStore()
+
+  const isRunning = ACTIVE_STATES.includes(testState)
   const hasViolations = (latestSnapshot?.threshold_violations?.length ?? 0) > 0
   const unreadWarnings = eventLog.filter(e => e.level === 'warn' || e.level === 'error').length
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'monitor', label: 'Monitor' },
-    { id: 'config', label: 'Config' },
-    { id: 'topology', label: 'Topology' },
-    { id: 'profiles', label: 'Profiles' },
-    { id: 'results', label: 'Results' },
-  ]
-
-  const duration = activeProfile?.duration_secs ?? 0
-  const remaining = duration > 0 && elapsedSecs != null ? Math.max(0, duration - elapsedSecs) : null
-
   return (
-    <header style={styles.header}>
-      {/* 로고 */}
-      <span style={styles.logo}>net-meter</span>
+    <header className="flex items-center px-6 h-14 bg-header flex-shrink-0" style={{ boxShadow: 'var(--header-shadow)' }}>
+      {/* Logo */}
+      <div className="flex items-center gap-2 mr-6 shrink-0">
+        <span className="font-bold text-lg text-primary tracking-tight">net-meter</span>
+      </div>
 
-      {/* 탭 내비게이션 */}
-      <nav style={styles.nav}>
-        {tabs.map(({ id, label }) => (
-          <button
-            key={id}
-            style={tab === id ? styles.tabActive : styles.tab}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      {/* Active test status */}
+      <ActiveTestStatus />
 
-      {/* 시험 상태 정보 */}
-      {activeProfile && (
-        <div style={styles.testInfo}>
-          <StateBadge state={testState} />
-          <span style={{ color: '#8b949e', fontSize: 12 }}>
-            {activeProfile.name}
-          </span>
-          {elapsedSecs != null && (
-            <span style={{ color: '#e6edf3', fontSize: 12, fontFamily: 'monospace' }}>
-              {formatTime(elapsedSecs)}
-              {remaining != null && (
-                <span style={{ color: '#8b949e' }}> / -{formatTime(remaining)}</span>
-              )}
-            </span>
-          )}
-          {duration > 0 && elapsedSecs != null && (
-            <div style={styles.progressBar}>
-              <div
-                style={{
-                  ...styles.progressFill,
-                  width: `${Math.min(100, (elapsedSecs / duration) * 100)}%`,
-                  background: isRunning ? '#3fb950' : '#8b949e',
-                }}
-              />
-            </div>
-          )}
-        </div>
-      )}
+      <div className="flex-1" />
 
-      {/* 글로벌 Start/Stop */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      {/* Right actions */}
+      <div className="flex items-center gap-3">
         {isRunning && (
-          <button className="btn-danger" onClick={stopTest} style={{ padding: '6px 14px', fontSize: 13 }}>
+          <Button variant="destructive" size="sm" onClick={stopTest}>
+            <Square className="h-3.5 w-3.5 fill-current" />
             Stop
-          </button>
+          </Button>
         )}
 
-        {/* 임계값 위반 알람 */}
         {hasViolations && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 5, fontSize: 11,
-            background: '#2d1515', border: '1px solid #f85149', borderRadius: 6,
-            padding: '3px 8px', color: '#f85149', fontWeight: 700,
-            animation: 'pulse 1.5s ease-in-out infinite',
-          }}>
-            ⚠ Threshold Violation
+          <div className="flex items-center gap-2 text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-1.5 text-xs font-semibold">
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+            Threshold Violation
           </div>
         )}
 
-        {/* 이벤트 경고 카운트 */}
         {unreadWarnings > 0 && !hasViolations && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
-            background: '#2d2015', border: '1px solid #d29922', borderRadius: 6,
-            padding: '3px 8px', color: '#d29922',
-          }}>
-            ⚠ {unreadWarnings}
+          <div className="flex items-center gap-2 text-warning bg-warning/10 border border-warning/30 rounded-lg px-4 py-1.5 text-xs font-semibold">
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+            {unreadWarnings} warning{unreadWarnings > 1 ? 's' : ''}
           </div>
         )}
 
-        {/* WS 연결 상태 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-          <div
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: '50%',
-              background: wsConnected ? '#3fb950' : '#f85149',
-            }}
-          />
-          <span style={{ color: '#8b949e' }}>{wsConnected ? 'Live' : 'Disconnected'}</span>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground border-l border-border pl-3">
+          {wsConnected
+            ? <Wifi className="h-4 w-4 text-success shrink-0" />
+            : <WifiOff className="h-4 w-4 text-destructive shrink-0" />}
+          <span className="font-medium">{wsConnected ? 'Live' : 'Disconnected'}</span>
         </div>
+
+        <ThemeToggle />
       </div>
     </header>
   )
 }
 
-function StateBadge({ state }: { state: string }) {
-  const colors: Record<string, string> = {
-    idle: '#8b949e',
-    preparing: '#d29922',
-    ramping_up: '#bc8cff',
-    running: '#3fb950',
-    stopping: '#d29922',
-    completed: '#58a6ff',
-    failed: '#f85149',
-  }
+// ─── 공유 컴포넌트 ────────────────────────────────────────────────────────────
+
+const STATE_VARIANT: Record<string, Parameters<typeof Badge>[0]['variant']> = {
+  idle:        'secondary',
+  preparing:   'warning',
+  ramping_up:  'purple',
+  running:     'success',
+  stopping:    'warning',
+  completed:   'default',
+  failed:      'destructive',
+}
+
+export function StateBadge({ state }: { state: string }) {
   return (
-    <span
-      style={{
-        padding: '2px 8px',
-        borderRadius: 20,
-        fontSize: 11,
-        fontWeight: 700,
-        background: colors[state] ?? '#8b949e',
-        color: '#0d1117',
-        textTransform: 'uppercase',
-        flexShrink: 0,
-      }}
-    >
-      {state}
-    </span>
+    <Badge variant={STATE_VARIANT[state] ?? 'secondary'}>
+      {state.replace('_', ' ')}
+    </Badge>
   )
 }
 
-function formatTime(secs: number): string {
+export function formatTime(secs: number): string {
   const m = Math.floor(secs / 60)
   const s = secs % 60
   return `${m}:${String(s).padStart(2, '0')}`
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-    padding: '10px 20px',
-    borderBottom: '1px solid #30363d',
-    background: '#161b22',
-    flexWrap: 'wrap',
-  },
-  logo: {
-    fontWeight: 700,
-    fontSize: 16,
-    color: '#58a6ff',
-    letterSpacing: '-0.02em',
-    flexShrink: 0,
-  },
-  nav: {
-    display: 'flex',
-    gap: 2,
-  },
-  tab: {
-    background: 'transparent',
-    color: '#8b949e',
-    padding: '5px 12px',
-    borderRadius: 6,
-    fontSize: 13,
-  },
-  tabActive: {
-    background: '#21262d',
-    color: '#e6edf3',
-    padding: '5px 12px',
-    borderRadius: 6,
-    fontSize: 13,
-  },
-  testInfo: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-    minWidth: 0,
-  },
-  progressBar: {
-    width: 80,
-    height: 4,
-    background: '#21262d',
-    borderRadius: 2,
-    overflow: 'hidden',
-    flexShrink: 0,
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 2,
-    transition: 'width 0.5s linear',
-  },
-  main: {
-    flex: 1,
-    padding: '20px 24px',
-    maxWidth: 1600,
-    margin: '0 auto',
-    width: '100%',
-  },
 }

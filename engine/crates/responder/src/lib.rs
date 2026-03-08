@@ -210,14 +210,26 @@ async fn serve_http<I>(
 }
 
 async fn handle_http(
-    _req: Request<hyper::body::Incoming>,
+    req: Request<hyper::body::Incoming>,
     global: Arc<Collector>,
     proto: Arc<Collector>,
     body_size: usize,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Content-Length 헤더에서 클라이언트가 전송한 요청 body 크기를 파악
+    let req_bytes = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
     let body = Bytes::from(vec![b'x'; body_size]);
     global.record_server_request(body_size as u64);
     proto.record_server_request(body_size as u64);
+    if req_bytes > 0 {
+        global.record_server_rx(req_bytes);
+        proto.record_server_rx(req_bytes);
+    }
 
     Ok(Response::builder()
         .status(200)

@@ -204,6 +204,7 @@ export interface MetricsSnapshot {
   ttfb_p99_ms: number
   server_requests: number
   server_bytes_tx: number
+  server_bytes_rx: number
   latency_histogram: HistogramBucket[]
   by_protocol: Record<string, PerProtocolSnapshot>
   status_code_breakdown: Record<number, number>

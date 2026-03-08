@@ -10,18 +10,36 @@ import {
   connectMetricsWs,
 } from '../api/client'
 
-const MAX_HISTORY = 300  // 최대 5분 분량 히스토리
-const MAX_EVENTS = 100   // 최대 이벤트 로그 항목 수
+const MAX_HISTORY = 300
+const MAX_EVENTS = 100
+
+// B-1: localStorage 기반 프로파일 관리
+const PROFILES_KEY = 'net-meter-profiles'
+
+function loadProfilesFromStorage(): TestConfig[] {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY)
+    return raw ? (JSON.parse(raw) as TestConfig[]) : []
+  } catch {
+    return []
+  }
+}
+
+function saveProfilesToStorage(profiles: TestConfig[]) {
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles))
+}
+
+// C-1: active 상태 판별
+const ACTIVE_STATES: TestState[] = ['preparing', 'ramping_up', 'running', 'stopping']
 
 export interface EventLogEntry {
   id: number
-  ts: string           // 로컬 시간 문자열
+  ts: string
   level: 'info' | 'warn' | 'error'
   message: string
 }
 
 interface TestStore {
-  // 상태
   testState: TestState
   activeProfile: TestConfig | null
   elapsedSecs: number | null
@@ -32,16 +50,14 @@ interface TestStore {
   wsConnected: boolean
   error: string | null
   eventLog: EventLogEntry[]
-  /** Profiles 탭에서 Config 탭으로 설정을 전달할 때 사용 */
   draftConfig: TestConfig | null
 
-  // 액션
   fetchStatus: () => Promise<void>
   startTest: (config: TestConfig) => Promise<void>
   stopTest: () => Promise<void>
-  fetchProfiles: () => Promise<void>
-  saveProfile: (config: TestConfig) => Promise<void>
-  deleteProfile: (id: string) => Promise<void>
+  fetchProfiles: () => void           // B-1: 동기 (localStorage)
+  saveProfile: (config: TestConfig) => void
+  deleteProfile: (id: string) => void
   fetchResults: () => Promise<void>
   deleteResult: (id: string) => Promise<void>
   connectWs: () => void
@@ -85,7 +101,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
   elapsedSecs: null,
   latestSnapshot: null,
   snapshotHistory: [],
-  savedProfiles: [],
+  savedProfiles: loadProfilesFromStorage(),  // B-1: localStorage에서 초기화
   testResults: [],
   wsConnected: false,
   error: null,
@@ -95,12 +111,27 @@ export const useTestStore = create<TestStore>((set, get) => ({
   fetchStatus: async () => {
     try {
       const status = await api.status()
+      const prevState = get().testState
+      const newState = status.state
+
       set({
-        testState: status.state,
+        testState: newState,
         activeProfile: status.config,
         elapsedSecs: status.elapsed_secs,
         error: null,
       })
+
+      // C-1: failed 진입 시 — 3초 후 히스토리 정리
+      if (
+        (newState === 'failed') &&
+        prevState !== 'failed' && prevState !== 'idle'
+      ) {
+        setTimeout(() => {
+          if (['failed', 'idle'].includes(get().testState)) {
+            set({ snapshotHistory: [] })
+          }
+        }, 3000)
+      }
     } catch (e) {
       set({ error: String(e) })
     }
@@ -109,7 +140,13 @@ export const useTestStore = create<TestStore>((set, get) => ({
   startTest: async (config) => {
     try {
       await api.startTest(config)
-      set({ testState: 'preparing', activeProfile: config, elapsedSecs: 0, error: null })
+      set({
+        testState: 'preparing',
+        activeProfile: config,
+        elapsedSecs: 0,
+        snapshotHistory: [],
+        error: null,
+      })
     } catch (e) {
       set({ error: String(e) })
     }
@@ -124,37 +161,22 @@ export const useTestStore = create<TestStore>((set, get) => ({
     }
   },
 
-  fetchProfiles: async () => {
-    try {
-      const profiles = await api.listProfiles()
-      set({ savedProfiles: profiles, error: null })
-    } catch (e) {
-      set({ error: String(e) })
-    }
+  // B-1: localStorage 기반 프로파일 — API 호출 없음
+  fetchProfiles: () => {
+    set({ savedProfiles: loadProfilesFromStorage() })
   },
 
-  saveProfile: async (config) => {
-    try {
-      const saved = await api.createProfile(config)
-      set((s) => ({
-        savedProfiles: [...s.savedProfiles.filter((p) => p.id !== saved.id), saved],
-        error: null,
-      }))
-    } catch (e) {
-      set({ error: String(e) })
-    }
+  saveProfile: (config) => {
+    const current = get().savedProfiles
+    const updated = [...current.filter((p) => p.id !== config.id), config]
+    saveProfilesToStorage(updated)
+    set({ savedProfiles: updated })
   },
 
-  deleteProfile: async (id) => {
-    try {
-      await api.deleteProfile(id)
-      set((s) => ({
-        savedProfiles: s.savedProfiles.filter((p) => p.id !== id),
-        error: null,
-      }))
-    } catch (e) {
-      set({ error: String(e) })
-    }
+  deleteProfile: (id) => {
+    const updated = get().savedProfiles.filter((p) => p.id !== id)
+    saveProfilesToStorage(updated)
+    set({ savedProfiles: updated })
   },
 
   fetchResults: async () => {
@@ -169,9 +191,7 @@ export const useTestStore = create<TestStore>((set, get) => ({
   deleteResult: async (id) => {
     try {
       await api.deleteResult(id)
-      set((s) => ({
-        testResults: s.testResults.filter((r) => r.id !== id),
-      }))
+      set((s) => ({ testResults: s.testResults.filter((r) => r.id !== id) }))
     } catch (e) {
       set({ error: String(e) })
     }
@@ -186,7 +206,10 @@ export const useTestStore = create<TestStore>((set, get) => ({
           if (history.length > MAX_HISTORY) history.shift()
           return { latestSnapshot: snap, snapshotHistory: history, wsConnected: true }
         })
-        get().fetchStatus()
+        // C-1: active 상태일 때만 fetchStatus 폴링
+        if (ACTIVE_STATES.includes(get().testState)) {
+          get().fetchStatus()
+        }
       },
       () => {
         wsInstance = null
@@ -195,7 +218,6 @@ export const useTestStore = create<TestStore>((set, get) => ({
       },
     )
 
-    // SSE 이벤트 스트림 연결
     if (!esInstance) {
       esInstance = connectEventStream(
         (ev) => {
@@ -205,11 +227,14 @@ export const useTestStore = create<TestStore>((set, get) => ({
             if (log.length > MAX_EVENTS) log.length = MAX_EVENTS
             return { eventLog: log }
           })
-          // 시험 상태 변경 이벤트 시 상태 동기화
-          if (ev.type === 'test_stopped' || ev.type === 'ramp_up_complete') {
+          // C-1: 상태 전환 이벤트 시 동기화
+          if (
+            ev.type === 'test_stopped' ||
+            ev.type === 'ramp_up_complete' ||
+            ev.type === 'error'
+          ) {
             get().fetchStatus()
           }
-          // 시험 종료 시 결과 자동 갱신 (서버가 저장 완료할 시간을 줌)
           if (ev.type === 'test_stopped') {
             setTimeout(() => get().fetchResults(), 600)
           }

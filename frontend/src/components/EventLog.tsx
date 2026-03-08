@@ -1,68 +1,64 @@
 import { useTestStore } from '../store/testStore'
+import { Card, CardContent, CardTitle } from './ui/card'
+import { Button } from './ui/button'
+import { cn } from '@/lib/utils'
 
 export default function EventLog() {
   const { eventLog, clearEventLog } = useTestStore()
 
-  if (eventLog.length === 0) return null
-
   return (
-    <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="card-title" style={{ margin: 0 }}>Event Log</div>
-        <button
-          className="btn-secondary"
-          onClick={clearEventLog}
-          style={{ fontSize: 11, padding: '3px 8px' }}
-        >
-          Clear
-        </button>
-      </div>
+    <Card>
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <CardTitle>Event Log</CardTitle>
+          {eventLog.length > 0 && (
+            <Button variant="ghost" size="xs" onClick={clearEventLog} className="text-muted-foreground">
+              Clear
+            </Button>
+          )}
+        </div>
 
-      <div
-        style={{
-          maxHeight: 200,
-          overflowY: 'auto',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
-          fontFamily: 'monospace',
-          fontSize: 12,
-        }}
-      >
-        {eventLog.map((entry) => (
-          <div
-            key={entry.id}
-            style={{
-              display: 'flex',
-              gap: 10,
-              padding: '2px 4px',
-              borderRadius: 3,
-              background: entry.level === 'error'
-                ? 'rgba(248,81,73,0.08)'
-                : entry.level === 'warn'
-                ? 'rgba(210,153,34,0.08)'
-                : 'transparent',
-            }}
-          >
-            <span style={{ color: '#484f58', flexShrink: 0 }}>{entry.ts}</span>
-            <span
-              style={{
-                color: entry.level === 'error' ? '#f85149'
-                  : entry.level === 'warn' ? '#d29922'
-                  : '#8b949e',
-                flexShrink: 0,
-                width: 36,
-              }}
-            >
-              [{entry.level.toUpperCase().slice(0, 4)}]
-            </span>
-            <span style={{ color: entry.level === 'error' ? '#f85149'
-              : entry.level === 'warn' ? '#e6ac3a' : '#e6edf3' }}>
-              {entry.message}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
+        <div className="h-28 overflow-y-auto flex flex-col gap-px">
+          {eventLog.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-xs text-muted-foreground/50 italic select-none">
+              No events yet
+            </div>
+          ) : (
+            eventLog.map((entry) => (
+              <div
+                key={entry.id}
+                className={cn(
+                  'flex gap-2 px-2 py-1 rounded-md text-xs',
+                  entry.level === 'error' && 'bg-destructive/8',
+                  entry.level === 'warn' && 'bg-warning/8',
+                )}
+              >
+                <span className="text-muted-foreground/50 shrink-0 font-mono">{entry.ts}</span>
+                <span
+                  className={cn(
+                    'shrink-0 font-semibold font-mono w-9',
+                    entry.level === 'error' ? 'text-destructive'
+                      : entry.level === 'warn' ? 'text-warning'
+                      : 'text-muted-foreground',
+                  )}
+                >
+                  {entry.level === 'error' ? 'ERR' : entry.level === 'warn' ? 'WRN' : 'INF'}
+                </span>
+                <span
+                  className={cn(
+                    'leading-relaxed',
+                    entry.level === 'error' ? 'text-destructive'
+                      : entry.level === 'warn' ? 'text-warning'
+                      : 'text-foreground/80',
+                  )}
+                >
+                  {entry.message}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </CardContent>
+    </Card>
   )
 }

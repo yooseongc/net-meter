@@ -3,6 +3,7 @@ import { useTestStore } from '../store/testStore'
 import MetricsPanel from './MetricsPanel'
 import EventLog from './EventLog'
 import TestRunPanel, { ALL_CHARTS, ChartKey } from './TestRunPanel'
+import TopologyView from './TopologyView'
 
 export default function Dashboard() {
   const { error } = useTestStore()
@@ -18,31 +19,24 @@ export default function Dashboard() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="flex flex-col gap-4">
       {error && (
-        <div style={styles.error}>
+        <div className="bg-destructive/10 border border-destructive rounded-xl px-4 py-2.5 text-sm text-destructive">
           <strong>Error:</strong> {error}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 16, alignItems: 'start' }}>
+      {/* 상단: 토폴로지 + 이벤트 로그 (시각적으로 연결) */}
+      <div className="flex flex-col gap-2">
+        <TopologyView compact />
+        <EventLog />
+      </div>
+
+      {/* 하단: 시험 제어 | 차트 */}
+      <div className="grid gap-4 items-start" style={{ gridTemplateColumns: '280px 1fr' }}>
         <TestRunPanel visibleCharts={visibleCharts} onToggleChart={onToggleChart} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <MetricsPanel visibleCharts={visibleCharts} />
-          <EventLog />
-        </div>
+        <MetricsPanel visibleCharts={visibleCharts} />
       </div>
     </div>
   )
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  error: {
-    background: '#2d1515',
-    border: '1px solid #f85149',
-    borderRadius: 8,
-    padding: '10px 16px',
-    color: '#f85149',
-    fontSize: 14,
-  },
 }
