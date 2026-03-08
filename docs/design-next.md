@@ -1,3 +1,7 @@
+> **[구현 완료]** Phase 10 (Association 기반 설정 + VLAN) 및 Phase 11 (External Port Mode)
+> 모두 구현되었습니다. 이 문서는 설계 참고용으로 보존됩니다.
+> 실제 구현 상세는 `docs/PROCESS.md`를 참조하세요.
+
 # 다음 단계 설계 (Phase 10, 11)
 
 ## Phase 10: Association 기반 설정 전환 + VLAN 지원
@@ -393,22 +397,23 @@ Client GW MAC    : [aa:bb:cc:...  ]   Server GW MAC   : [aa:bb:cc:...  ]
 
 | Phase | 내용 | 상태 |
 |-------|------|------|
-| 10 | Association 기반 설정 전환 (ClientNet, total_clients, per-client 부하), VLAN 지원 | 계획 |
-| 11 | External Port Mode (물리 NIC 2개, DUT 연동, SO_BINDTODEVICE, static ARP) | 계획 |
+| 10 | Association 기반 설정 전환 (ClientNet, total_clients, per-client 부하), VLAN 지원 | ✅ 완료 |
+| 11 | External Port Mode (물리 NIC 2개, DUT 연동, SO_BINDTODEVICE, static ARP, 정책 라우팅) | ✅ 완료 |
 
 ### Phase 10 세부 작업
 
-- [ ] `core/src/config.rs`: Association, ClientNet, VlanConfig, NetworkConfig/NetworkMode 추가; LoadConfig per-client 전환; TestConfig.total_clients 추가
-- [ ] `ns/src/veth.rs`: `assign_client_ips()`, `add_vlan_subif()`, `add_qinq_subif()` 추가
-- [ ] `control/src/orchestrator.rs`: Association 기반 NS IP 셋업, VLAN subif 생성
-- [ ] `generator/src/`: per-client IP bind 소켓, cps/cc_per_client 기준 워커
-- [ ] `frontend/src/`: Association 편집 UI, ClientNet 입력, VLAN 설정 폼, LoadConfig 레이블 변경
+- [x] `core/src/config.rs`: Association, ClientNet, VlanConfig, NetworkConfig/NetworkMode 추가; LoadConfig per-client 전환; TestConfig.total_clients 추가
+- [x] `ns/src/veth.rs`: `assign_client_ips()`, `add_vlan_subif()`, `add_qinq_subif()` 추가
+- [x] `control/src/orchestrator.rs`: Association 기반 NS IP 셋업, VLAN subif 생성
+- [x] `generator/src/`: per-client IP bind 소켓, cps/cc_per_client 기준 워커
+- [x] `frontend/src/`: Association 편집 UI, ClientNet 입력, VLAN 설정 폼, LoadConfig 레이블 변경
 
 ### Phase 11 세부 작업
 
-- [ ] `core/src/config.rs`: ExternalPortOptions, NetworkConfig.ext 필드 추가
-- [ ] `engine/crates/ns/src/port.rs` (신규): `setup_external_port()`, `teardown_external_port()`
-- [ ] `control/src/orchestrator.rs`: NetworkMode::ExternalPort 분기
-- [ ] `generator/src/`: client IP bind (bind(src_ip, 0) 기본, SO_BINDTODEVICE 선택)
-- [ ] `responder/src/`: server IP bind
-- [ ] `frontend/src/`: External Port 설정 폼, Topology 뷰 External Port 다이어그램
+- [x] `core/src/config.rs`: ExternalPortOptions, NetworkConfig.ext 필드 추가
+- [x] `engine/crates/ns/src/port.rs` (신규): `setup_external_port()`, `teardown_external_port()`, `setup_policy_routing()`, `teardown_policy_routing()`
+- [x] `control/src/orchestrator.rs`: NetworkMode::ExternalPort 분기
+- [x] `generator/src/`: client IP bind (bind(src_ip, 0))
+- [x] `responder/src/`: server IP bind
+- [x] `frontend/src/`: External Port 설정 폼, Topology 뷰 External Port 다이어그램
+- [x] `testbed/veth-dut/`: 단일 머신 External Port 모드 검증 테스트베드

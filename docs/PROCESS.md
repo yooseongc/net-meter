@@ -23,7 +23,6 @@
 | P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | ✅ 완료 |
 | P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | ✅ 완료 |
 | P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | ✅ 완료 |
-| 11 | Phase 11 — External Port Mode (물리 NIC, DUT 연동, VLAN, static ARP) | ✅ 완료 |
 
 ---
 
@@ -534,7 +533,7 @@ npm run build → ✓ built in 2.41s
 
 ---
 
-## Phase 11: External Port Mode (설계 완료)
+## Phase 11: External Port Mode ✅
 
 **목표:** 물리 NIC 2개(inbound/outbound 포트)를 사용, 외부 DUT를 경유하는 실제 시험
 
@@ -545,14 +544,16 @@ npm run build → ✓ built in 2.41s
 [net-meter Generator] --(eth1: client_iface)--> [외부 DUT] --(eth2: server_iface)--> [net-meter Responder]
 ```
 
-**핵심 변경:**
-- `NetworkMode::ExternalPort` 추가
-- `ExternalPortOptions { client_iface, server_iface, client_gateway, client_gateway_mac, ... }`
-- `engine/crates/ns/src/port.rs` (신규): NIC IP 할당, VLAN subif, static ARP entry
-- Orchestrator: ExternalPort 분기 (NS 생성/삭제 스킵, port.rs 셋업/정리)
-- Generator: `bind(client_ip, 0)`, 필요 시 `SO_BINDTODEVICE`
-- Responder: `bind(server_ip, port)` (0.0.0.0 대신 특정 IP)
-- Frontend: External Port 설정 폼 + Topology 뷰 DUT 다이어그램
+**구현 완료 사항:**
+- [x] `NetworkMode::ExternalPort` 추가
+- [x] `ExternalPortOptions { client_iface, server_iface, client_gateway, client_gateway_mac, ... }`
+- [x] `engine/crates/ns/src/port.rs` (신규): NIC IP 할당, VLAN subif, static ARP entry
+- [x] Orchestrator: ExternalPort 분기 (NS 생성/삭제 스킵, port.rs 셋업/정리)
+- [x] Generator: `bind(client_ip, 0)`, 필요 시 `SO_BINDTODEVICE`
+- [x] Responder: `bind(server_ip, port)` (0.0.0.0 대신 특정 IP)
+- [x] Frontend: External Port 설정 폼 + Topology 뷰 DUT 다이어그램
+- [x] 정책 라우팅: DUT short-circuit 방지 (table 191/192)
+- [x] veth-dut 테스트베드: 단일 머신 External Port 모드 검증
 
 ---
 
@@ -704,9 +705,72 @@ npm run build → ✓ built in 2.41s
 
 ---
 
+## External Port 정책 라우팅 + veth-dut 테스트베드 ✅
+
+**목표:** External Port 모드에서 DUT 우회(short-circuit) 방지 및 단일 머신 테스트베드 구축
+
+**달성 사항:**
+
+### 정책 라우팅 (Policy Routing)
+
+**문제:** net-meter 호스트에 upper/lower 인터페이스가 모두 있으면 Generator가 서버 IP로 접속 시 커널이 lower_iface로 직접 라우팅하여 DUT를 우회함.
+
+**해결:**
+- [x] `ns/veth.rs`: 정책 라우팅 프리미티브 추가
+  - `add_ip_rule` / `del_ip_rule` (ip rule)
+  - `add_route_table_dev` / `flush_route_table` (ip route table)
+  - `is_rule_exists_error()` — 중복 추가 무시용
+- [x] `ns/port.rs`:
+  - `PolicyRoutingState` 구조체 추가
+  - `setup_policy_routing()`: 양방향 정책 라우팅 설정
+    - table 191: client CIDR → default dev upper_iface (Generator → DUT 방향 강제)
+    - table 192: server IP/32 → default dev lower_iface (Responder → DUT 방향 강제)
+  - `teardown_policy_routing()`: ip rule 제거 + route table flush
+  - `setup_external_port()`에서 불필요한 promisc 설정 제거
+- [x] `ns/lib.rs`: PolicyRoutingState / setup·teardown_policy_routing re-export
+- [x] `control/state.rs`: `ext_policy_routing: Mutex<Option<PolicyRoutingState>>` 필드 추가
+- [x] `control/orchestrator.rs`:
+  - `start_external_port_mode()`: IP 할당 후 정책 라우팅 자동 설정
+  - `do_stop()`: ExternalPort 모드 종료 시 정책 라우팅 자동 정리
+
+**트래픽 흐름 (DUT=proxy ARP 활성화 필요):**
+```
+Generator (upper, src=client_ip)
+  → ip rule: from client_cidr → table 191
+  → table 191: default dev upper_iface
+  → upper_iface → DUT → lower_iface → Responder
+
+Responder (lower, src=server_ip)
+  → ip rule: from server_ip/32 → table 192
+  → table 192: default dev lower_iface
+  → lower_iface → DUT → upper_iface → Generator
+```
+
+### veth-dut 테스트베드
+
+**단일 머신에서 External Port 모드를 검증하기 위한 veth + bridge 토폴로지:**
+
+```
+veth-c0 (upper) ←── veth-c1 ──┐
+                                br-dut  (L2 bridge, DUT 시뮬레이션)
+veth-s0 (lower) ←── veth-s1 ──┘
+```
+
+- Proxy ARP 불필요: ARP broadcast가 bridge를 통해 자연스럽게 전달됨
+- 정책 라우팅으로 단락 방지
+- `testbed/veth-dut/setup.sh`: 토폴로지 생성 + 빌드 + net-meter 실행 (Ctrl+C 시 자동 정리)
+- `testbed/veth-dut/teardown.sh`: 비상 정리용
+
+**실행:**
+```bash
+sudo env PATH="$PATH" ./testbed/veth-dut/setup.sh
+```
+
+---
+
 ## 참고 문서
 
 - `testbed/topology.md`: 네트워크 토폴로지 및 수동 설정 예시
 - `CLAUDE.md`: 프로젝트 요구사항 전체
-- `docs/MODE.md`: 시험 모드(CPS/CC/BW × HTTP/1.1/HTTP/2) 동작 및 계측 지표 정리
-- `docs/TODO.md`: 잔여 작업 목록 (P1/P2/Phase7+)
+- `docs/MODE.md`: 시험 모드(CPS/CC/BW × TCP/HTTP/1.1/HTTP/2) 동작 및 계측 지표 정리
+- `docs/TODO.md`: 잔여 작업 목록

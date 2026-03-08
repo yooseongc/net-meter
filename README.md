@@ -1,50 +1,61 @@
 # net-meter
 
 네트워크 성능 계측기 / 트래픽 시험기.
-Avalanche와 유사한 구조로 CPS · BW · CC 시험을 수행하며, Linux 네트워크 네임스페이스로 격리된 가상 Client/Server 환경을 제공합니다.
+Avalanche와 유사한 구조로 CPS · BW · CC 시험을 수행하며, Linux 네트워크 네임스페이스 또는 물리 NIC 2개로 격리된 가상 Client/Server 환경을 제공합니다.
 
 ## 주요 기능
 
-- **CPS (Connections Per Second)** — 초당 신규 연결 수 측정, latency 분포(p50/p95/p99)
+- **CPS (Connections Per Second)** — 초당 신규 연결 수 측정, latency 분포 (p50/p95/p99)
 - **BW (Bandwidth)** — 대역폭 최대치 측정, goodput / retransmission 지표
 - **CC (Concurrent Connections)** — 목표 동시 연결 수 유지, 메모리 footprint 관찰
+- **TCP** — CPS: ping-pong, CC/BW: 스트리밍 모드
 - **HTTP/1.1** — keep-alive, GET/POST, request/response body 크기 설정, URL 길이 조정
+- **HTTP/2 (h2c)** — Prior Knowledge cleartext HTTP/2, 연결당 다중 스트림
+- **TLS** — rustls 0.23 + rcgen 자체 서명 인증서 (HTTP/1.1, HTTP/2 공통)
+- **VLAN** — 단일 태그 (802.1Q) / 이중 태그 QinQ (802.1ad) 지원
 - **네트워크 네임스페이스** — client NS / server NS 자동 생성·정리, veth pair + IP forwarding
+- **External Port 모드** — 물리 NIC 2개로 외부 DUT 연동, 정책 라우팅으로 short-circuit 방지
 - **실시간 대시보드** — React 기반 UI, WebSocket 스트림, 시계열 차트
-- **TCP 소켓 옵션** — Delayed ACK 제어(TCP_QUICKACK), SO_REUSEPORT
+- **임계값 / 자동중단** — min_cps, max_error_rate, max_latency_p99, auto_stop_on_fail
+- **Ramp-up / Ramp-down** — 선형 부하 증감, TestState::RampingUp/RampingDown
 
 ## 아키텍처
 
+### 네트워크 모드 3종
+
+**Loopback 모드 (기본, 권한 불필요)**
 ```
-┌─────────────────────────────────────────────┐
-│                   HOST NS                    │
-│                                             │
-│  net-meter (Control + Generator + Responder) │
-│  ├─ Control API   :9090  (REST + WebSocket)  │
-│  ├─ React UI      :9090/                     │
-│  ├─ veth-c0  10.10.0.1/30                   │
-│  └─ veth-s0  10.20.0.1/30                   │
-│       │                    │                 │
-└───────│────────────────────│─────────────────┘
-        │                    │
-┌───────┘          ┌─────────┘
-│  CLIENT NS       │  SERVER NS
-│  veth-c1         │  veth-s1
-│  10.10.0.2/30    │  10.20.0.2/30
-│  [Generator]     │  [Responder]
-└──────────────────┘
+Generator ──localhost──▶ Responder
+(호스트 네임스페이스)      (호스트 네임스페이스)
+```
+
+**Namespace 모드 (CAP_NET_ADMIN 필요)**
+```
+[client NS]                   [host: ip_forward=1]              [server NS]
+  10.255.1.2/30 ←─link─→  veth-c0: 10.255.1.1/30            10.255.2.2/30
+  client CIDRs              veth-s0: 10.255.2.1/30  ─link─→  server IPs (/32)
+  default gw: 10.255.1.1                                        default gw: 10.255.2.1
+```
+
+**External Port 모드 (CAP_NET_ADMIN 필요)**
+```
+Generator (upper/client_iface)
+  → [정책 라우팅: table 191]
+  → upper_iface → [외부 DUT] → lower_iface
+  → [정책 라우팅: table 192]
+  → Responder (lower/server_iface)
 ```
 
 ### 크레이트 구조
 
 ```
 engine/crates/
-  core/       공통 타입: TestProfile, MetricsSnapshot, NetMeterError
-  metrics/    lock-free atomic 카운터 + hdrhistogram (p50/p95/p99)
-  ns/         네임스페이스 관리: veth pair, setns, IP forwarding
-  generator/  HTTP/1.1 트래픽 발생기 (CPS/CC/BW)
-  responder/  hyper 1.0 기반 가상 HTTP 서버
-  control/    REST API (axum) + 오케스트레이션 바이너리
+  core/       공통 타입: TestConfig, TestState, MetricsSnapshot, NetMeterError
+  metrics/    lock-free atomic 카운터 + hdrhistogram (p50/p95/p99) + MultiAggregator
+  ns/         네임스페이스 관리: veth pair, setns, IP forwarding, 정책 라우팅, External Port
+  generator/  TCP/HTTP1/HTTP2 트래픽 발생기 (dual collector, per-client IP 바인딩, NS 모드)
+  responder/  TCP/HTTP1/HTTP2 가상 서버 (hyper 1.0, TLS, NS 모드)
+  control/    REST API (axum 0.7) + 오케스트레이션 바이너리
 ```
 
 ## 요구사항
@@ -54,7 +65,7 @@ engine/crates/
 | Linux | 5.x 이상 (WSL2 포함) |
 | Rust | stable (1.75+) |
 | Node.js | 18+ |
-| 권한 | namespace 모드는 root 또는 CAP_NET_ADMIN 필요 |
+| 권한 | Namespace/External Port 모드는 root 또는 CAP_NET_ADMIN 필요 |
 
 ## 빠른 시작
 
@@ -63,7 +74,7 @@ engine/crates/
 ./scripts/setup.sh
 
 # 2. 빌드 + 실행 (프론트 빌드 → 엔진 빌드 → 서버 시작)
-./scripts/run.sh
+./scripts/run-dev.sh
 
 # 브라우저: http://localhost:9090
 ```
@@ -71,11 +82,26 @@ engine/crates/
 ### 옵션
 
 ```bash
-./scripts/run.sh --port 8080          # 포트 변경
-./scripts/run.sh --skip-frontend      # 프론트 재빌드 생략
-./scripts/run.sh --no-build           # 빌드 없이 바로 실행
-./scripts/run.sh --release            # 최적화 빌드
-sudo ./scripts/run.sh                 # namespace 모드 시험 (root 필요)
+./scripts/run-dev.sh --port 8080          # 포트 변경
+./scripts/run-dev.sh --skip-frontend      # 프론트 재빌드 생략
+./scripts/run-dev.sh --no-build           # 빌드 없이 바로 실행
+./scripts/run-dev.sh --release            # 최적화 빌드
+sudo env PATH="$PATH" ./scripts/run-dev.sh --mode namespace  # Namespace 모드
+```
+
+### External Port 모드 (veth-dut 테스트베드)
+
+단일 머신에서 External Port 모드를 검증하는 veth + bridge 토폴로지:
+
+```
+veth-c0 (upper) ←── veth-c1 ──┐
+                                br-dut  (L2 bridge, DUT 시뮬레이션)
+veth-s0 (lower) ←── veth-s1 ──┘
+```
+
+```bash
+sudo env PATH="$PATH" ./testbed/veth-dut/setup.sh
+# Ctrl+C 시 자동 정리
 ```
 
 ### 개발 모드 (hot reload)
@@ -93,51 +119,69 @@ cd frontend && npm run dev   # → http://localhost:3000
 | Method | Path | 설명 |
 |--------|------|------|
 | GET | `/api/health` | 헬스체크 |
-| GET | `/api/status` | 현재 시험 상태 |
-| POST | `/api/test/start` | 시험 시작 |
+| GET | `/api/status` | 현재 시험 상태 (state, config, elapsed_secs) |
+| POST | `/api/test/start` | 시험 시작 (body: TestConfig JSON) |
 | POST | `/api/test/stop` | 시험 중지 |
 | GET | `/api/metrics` | 최신 MetricsSnapshot |
-| GET | `/api/metrics/ws` | WebSocket 실시간 스트림 |
-| GET | `/api/profiles` | 저장된 프로파일 목록 |
-| POST | `/api/profiles` | 프로파일 저장 |
-| DELETE | `/api/profiles/:id` | 프로파일 삭제 |
+| GET | `/api/metrics/ws` | WebSocket 실시간 스트림 (1초 간격) |
+| GET | `/api/profiles` | 저장된 TestConfig 목록 |
+| POST | `/api/profiles` | TestConfig 저장 |
+| DELETE | `/api/profiles/:id` | TestConfig 삭제 |
+| GET | `/api/results` | 완료된 시험 결과 목록 (최대 50개, 최신순) |
+| DELETE | `/api/results/:id` | 결과 삭제 |
+| GET | `/api/events/stream` | SSE 실시간 이벤트 로그 |
 
-### TestProfile 예시
+### TestConfig 예시
 
 ```json
 {
-  "id": "uuid-v4",
-  "name": "CPS-100 로컬",
+  "name": "CPS 시험",
   "test_type": "cps",
-  "protocol": "http1",
-  "target_host": "127.0.0.1",
-  "target_port": 8080,
   "duration_secs": 30,
-  "target_cps": 100,
-  "method": "GET",
-  "path": "/",
-  "response_body_bytes": 1024,
-  "request_body_bytes": 0,
-  "path_extra_bytes": 0,
-  "tcp_quickack": false,
-  "use_namespace": false
+  "network": { "mode": "loopback" },
+  "clients": [{ "id": "c1", "cidr": "127.0.0.1/8", "count": 10 }],
+  "servers": [{ "id": "s1", "port": 8080, "protocol": "http1" }],
+  "associations": [{
+    "id": "a1", "client_id": "c1", "server_id": "s1",
+    "payload": { "type": "Http", "method": "GET", "path": "/" }
+  }],
+  "default_load": { "num_connections": 100 }
 }
 ```
 
-### namespace 모드 예시
+### TestConfig 구조
 
-```json
-{
-  "test_type": "cps",
-  "target_host": "10.20.0.2",
-  "target_port": 8080,
-  "use_namespace": true,
-  "netns_prefix": "nm"
+```
+TestConfig {
+  id, name
+  test_type: cps / cc / bw
+  duration_secs: u64
+  default_load: LoadConfig {
+    num_connections       -- 총 클라이언트/연결 수 (워커 자동 배분)
+    connect_timeout_ms
+    response_timeout_ms
+    ramp_up_secs          -- 0=off, >0 → 선형 증가
+    ramp_down_secs        -- 0=off, >0 → 선형 감소
+  }
+  clients: [{ id, cidr, count? }]
+  servers: [{ id, ip?, port, protocol, tls }]
+  associations: [{
+    id, name, client_id, server_id
+    payload: Tcp(tx_bytes, rx_bytes) | Http(method, path, ...)
+    load?: LoadConfig      -- per-association 오버라이드
+    vlan?: VlanConfig      -- 단일/이중 태그
+  }]
+  network: {
+    mode: loopback / namespace / external_port
+    ns: NsOptions
+    ext?: ExternalPortOptions { client_iface, server_iface, ... }
+    tcp_quickack: bool
+  }
+  thresholds?: {
+    min_cps, max_error_rate_pct, max_latency_p99_ms, auto_stop_on_fail
+  }
 }
 ```
-
-> `use_namespace: true`이면 `nm-client` / `nm-server` 네임스페이스를 자동 생성하고,
-> 시험 종료 후 자동으로 정리합니다.
 
 ## 측정 지표
 
@@ -145,28 +189,40 @@ cd frontend && npm run dev   # → http://localhost:3000
 connections_attempted / established / failed / timed_out
 active_connections
 requests_total / responses_total
-status_2xx / 4xx / 5xx
+status_2xx / 4xx / 5xx / other
+status_code_breakdown: {코드: 횟수}
 bytes_tx_total / bytes_rx_total
 cps / rps / bytes_tx_per_sec / bytes_rx_per_sec
 latency_mean/p50/p95/p99/max (ms)
 connect_mean/p99 (ms)
 ttfb_mean/p99 (ms)
-server_requests / server_bytes_tx
+latency_histogram: 11개 버킷 (0.5~500ms + Inf)
+server_requests / server_bytes_tx / server_bytes_rx
+by_protocol: { "http1": {...}, "http2": {...}, "tcp": {...} }
+threshold_violations: [위반 항목]
 ```
 
 ## 개발 로드맵
 
 | Phase | 내용 | 상태 |
 |-------|------|------|
-| 1 | 기초 스켈레톤: 워크스페이스, Control API | ✅ |
+| 1 | 기초 스켈레톤: Rust 워크스페이스, Control API 서버 | ✅ |
 | 2 | Generator 고도화 + hdrhistogram | ✅ |
 | 3 | Responder hyper 1.0 + 서버 사이드 메트릭 | ✅ |
 | 4 | Namespace 관리: veth, setns, IP forwarding | ✅ |
-| 5 | BW/CC 시험 고도화 | 예정 |
-| 6 | Frontend 차트 개선, 프로파일 UI | 예정 |
-| 7 | HTTP/2 지원 | 예정 |
-| 8 | TLS (rustls + rcgen 자체 서명) | 예정 |
-| 9 | eBPF/XDP 옵션 계측 | 예정 |
+| 5 | 부가 기능: SO_REUSEPORT, 정적 서빙, TCP_QUICKACK | ✅ |
+| 6 | Frontend UI 고도화: 차트, 프로파일 편집기 | ✅ |
+| 7 | HTTP/2 h2c 지원 | ✅ |
+| Booster | TCP 프로토콜 + 다중 Pair + TestConfig 전환 | ✅ |
+| 8 | TLS: rustls + rcgen 자체 서명 인증서 | ✅ |
+| P1 | Thresholds + Ramp-up + SSE 이벤트 로그 + 상태코드 breakdown | ✅ |
+| P2 | UI 개선: 사이드바, 결과 비교, 서버 RX 지표 | ✅ |
+| P3~P5 | 총 클라이언트 수 기반 배분, Ramp-down, CC/BW 분리 | ✅ |
+| 10 | Association 기반 설정 전환 + VLAN 지원 | ✅ |
+| 11 | External Port Mode: 물리 NIC 2개 + DUT 연동 + 정책 라우팅 | ✅ |
+| UI-R | Frontend UI 전면 리팩터: Tailwind CSS v4 + shadcn/ui + Dark/Light 모드 | ✅ |
+| UI-1~4 | UI 개선 (레이아웃, 데이터, 버그, UX) | ✅ |
+| veth-dut | 단일 머신 External Port 검증 테스트베드 | ✅ |
 
 ## 라이선스
 
