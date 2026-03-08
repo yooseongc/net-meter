@@ -182,10 +182,22 @@ function ServerDialog({ server, open, onSave, onCancel }: {
           </Field>
         </Row>
         {!isTcp && (
-          <label className="flex items-center gap-2.5 text-sm cursor-pointer">
-            <Switch checked={s.tls ?? false} onCheckedChange={(v) => setS((p) => ({ ...p, tls: v }))} />
-            Enable TLS (self-signed cert)
-          </label>
+          <>
+            <label className="flex items-center gap-2.5 text-sm cursor-pointer">
+              <Switch checked={s.tls ?? false} onCheckedChange={(v) => setS((p) => ({ ...p, tls: v }))} />
+              Enable TLS (self-signed cert)
+            </label>
+            {(s.tls ?? false) && (
+              <Field label="TLS Server Name (SNI)">
+                <Input
+                  value={s.tls_server_name ?? 'test.net-meter.com'}
+                  placeholder="test.net-meter.com"
+                  onChange={(e) => setS((p) => ({ ...p, tls_server_name: e.target.value || 'test.net-meter.com' }))}
+                />
+                <p className="text-xs text-muted-foreground mt-1">IP 주소 입력 시 자동으로 &quot;localhost&quot;로 대체됩니다.</p>
+              </Field>
+            )}
+          </>
         )}
         <div className="flex gap-2 pt-1">
           <Button onClick={() => onSave(s)} className="flex-1">Save Server</Button>

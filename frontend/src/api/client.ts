@@ -84,6 +84,8 @@ export interface ServerDef {
   port: number
   protocol: Protocol
   tls?: boolean
+  /** TLS SNI 서버 이름. IP 주소 입력 시 "localhost"로 대체. 기본: "test.net-meter.com" */
+  tls_server_name?: string
 }
 
 // ---------------------------------------------------------------------------

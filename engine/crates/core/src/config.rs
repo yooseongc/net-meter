@@ -292,6 +292,14 @@ pub struct ServerDef {
     /// TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)
     #[serde(default)]
     pub tls: bool,
+    /// TLS SNI 서버 이름. IP 주소를 입력하면 "localhost"로 대체된다.
+    /// 기본값: "test.net-meter.com"
+    #[serde(default = "default_tls_server_name")]
+    pub tls_server_name: String,
+}
+
+fn default_tls_server_name() -> String {
+    "test.net-meter.com".to_string()
 }
 
 impl Default for ServerDef {
@@ -303,6 +311,7 @@ impl Default for ServerDef {
             port: 8080,
             protocol: Protocol::Http1,
             tls: false,
+            tls_server_name: default_tls_server_name(),
         }
     }
 }
@@ -461,6 +470,7 @@ impl TestConfig {
             port: 8080,
             protocol: Protocol::Http1,
             tls: false,
+            tls_server_name: default_tls_server_name(),
         };
         let assoc = Association {
             id: uuid::Uuid::new_v4().to_string(),

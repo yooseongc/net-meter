@@ -10,15 +10,21 @@ use rustls::{ClientConfig, DigitallySignedStruct, Error, ServerConfig, Signature
 /// rcgen으로 자체 서명 인증서를 생성하고,
 /// 클라이언트는 인증서 검증을 비활성화(NoCertVerifier)하여
 /// IP 주소로 직접 연결해도 동작한다.
+///
+/// ALPN:
+/// - server_config: ["h2", "http/1.1"] (둘 다 지원)
+/// - client_h1_config: ["http/1.1"]
+/// - client_h2_config: ["h2"]
 pub struct TlsBundle {
     pub server_config: Arc<ServerConfig>,
-    pub client_config: Arc<ClientConfig>,
+    pub client_h1_config: Arc<ClientConfig>,
+    pub client_h2_config: Arc<ClientConfig>,
 }
 
 /// 자체 서명 인증서 기반 TlsBundle을 빌드한다.
 pub fn build() -> anyhow::Result<TlsBundle> {
-    // 자체 서명 서버 인증서 생성 (SAN: localhost)
-    let params = CertificateParams::new(vec!["localhost".to_string()])
+    // 자체 서명 서버 인증서 생성 (SAN: test.net-meter.com)
+    let params = CertificateParams::new(vec!["test.net-meter.com".to_string()])
         .map_err(|e| anyhow::anyhow!("rcgen params: {}", e))?;
     let key_pair = KeyPair::generate()
         .map_err(|e| anyhow::anyhow!("rcgen keygen: {}", e))?;
@@ -31,19 +37,29 @@ pub fn build() -> anyhow::Result<TlsBundle> {
         PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
     );
 
-    let server_config = ServerConfig::builder()
+    let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)
         .map_err(|e| anyhow::anyhow!("ServerConfig: {}", e))?;
+    // ALPN: 서버는 h2와 http/1.1 모두 수락
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    let client_config = ClientConfig::builder()
+    let mut client_h1_config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
         .with_no_client_auth();
+    client_h1_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    let mut client_h2_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+        .with_no_client_auth();
+    client_h2_config.alpn_protocols = vec![b"h2".to_vec()];
 
     Ok(TlsBundle {
         server_config: Arc::new(server_config),
-        client_config: Arc::new(client_config),
+        client_h1_config: Arc::new(client_h1_config),
+        client_h2_config: Arc::new(client_h2_config),
     })
 }
 

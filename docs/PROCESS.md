@@ -23,6 +23,7 @@
 | P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | ✅ 완료 |
 | P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | ✅ 완료 |
 | P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | ✅ 완료 |
+| TLS-ALPN | ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 | ✅ 완료 |
 
 ---
 
@@ -764,6 +765,56 @@ veth-s0 (lower) ←── veth-s1 ──┘
 **실행:**
 ```bash
 sudo env PATH="$PATH" ./testbed/veth-dut/setup.sh
+```
+
+---
+
+## TLS-ALPN: ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 ✅
+
+**목표:** HTTP/2 over TLS 시 ALPN으로 프로토콜 협상, 사용자가 TLS SNI 서버 이름을 설정 가능하게 함
+
+**달성 사항:**
+
+### 1. TlsBundle 분리 (`control/src/tls.rs`)
+- [x] `TlsBundle.client_config` → `client_h1_config` + `client_h2_config` 분리
+- [x] 인증서 SAN: `"localhost"` → `"test.net-meter.com"` 변경
+- [x] ALPN 설정:
+  - `server_config`: `["h2", "http/1.1"]` (둘 다 수락)
+  - `client_h1_config`: `["http/1.1"]`
+  - `client_h2_config`: `["h2"]`
+
+### 2. ServerDef에 tls_server_name 필드 추가 (`core/src/config.rs`)
+- [x] `ServerDef.tls_server_name: String` 추가 (`#[serde(default = "default_tls_server_name")]`)
+- [x] 기본값: `"test.net-meter.com"`
+
+### 3. Generator TLS 설정 분리 (`generator/src/lib.rs`)
+- [x] `start()` 파라미터: `tls_client_config` → `tls_h1_config + tls_h2_config` 분리
+- [x] 프로토콜별 TLS config 선택: `Http2` → `tls_h2_config`, 나머지 → `tls_h1_config`
+- [x] `tls_server_name` 연쇄 전달: `start()` → `dispatch()` → `http1::run()` / `http2::run()`
+
+### 4. SNI 해석 헬퍼 (`generator/src/http1.rs`, `http2.rs`)
+- [x] `resolve_tls_sni(name: &str) -> ServerName<'static>` 함수 추가
+  - IP 주소 입력 시 RFC 6066 규정에 따라 `"localhost"`로 자동 대체
+  - 그 외: 입력값 그대로 사용
+- [x] 하드코딩된 `"localhost"` SNI 3곳(http1) + 1곳(http2) 제거 → `resolve_tls_sni()` 호출로 대체
+
+### 5. Orchestrator 업데이트 (`control/src/orchestrator.rs`)
+- [x] 3개 모드(Loopback/Namespace/ExternalPort) 모두 `client_h1_tls` + `client_h2_tls` 분리 추출 및 전달
+
+### 6. 프론트엔드
+- [x] `api/client.ts`: `ServerDef.tls_server_name?: string` 추가
+- [x] `TestControl.tsx`: TLS 활성화 시 SNI 서버 이름 입력 필드 표시, IP 입력 시 localhost 대체 안내 문구 표시
+
+**동작:**
+- TLS + HTTP/1.1: ALPN `"http/1.1"` 협상, SNI = 입력값 또는 default
+- TLS + HTTP/2: ALPN `"h2"` 협상, SNI = 입력값 또는 default
+- 서버 이름에 IP 주소 입력 시: SNI는 `"localhost"` 사용 (RFC 6066 준수)
+- 인증서 검증은 항상 NoCertVerifier로 우회 (시험 도구 특성)
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 16.89s
+npm run build → ✓ built in 3.30s
 ```
 
 ---

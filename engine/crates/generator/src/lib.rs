@@ -33,7 +33,8 @@ impl Generator {
     /// `pair_addrs`: assoc_id → "host:port" 맵 (오케스트레이터가 계산)
     /// `proto_collectors`: Protocol → Arc<Collector> 맵 (per-protocol 집계용)
     /// `client_ns`: Some(name)이면 해당 NS로 진입 후 실행
-    /// `tls_client_config`: TLS가 활성화된 server에서 사용할 ClientConfig
+    /// `tls_h1_config`: HTTP/1.1 TLS ClientConfig (ALPN: ["http/1.1"])
+    /// `tls_h2_config`: HTTP/2 TLS ClientConfig (ALPN: ["h2"])
     /// `client_ips`: assoc_id → Vec<client_ip> — per-워커 소스 IP 목록 (비어있으면 IP 바인딩 없음)
     pub async fn start(
         &mut self,
@@ -42,7 +43,8 @@ impl Generator {
         proto_collectors: &HashMap<Protocol, Arc<Collector>>,
         pair_addrs: &HashMap<String, String>,
         client_ns: Option<String>,
-        tls_client_config: Option<Arc<ClientConfig>>,
+        tls_h1_config: Option<Arc<ClientConfig>>,
+        tls_h2_config: Option<Arc<ClientConfig>>,
         client_ips: &HashMap<String, Vec<String>>,
     ) {
         // 기본 부하(default_load)를 사용하는 association 수 계산:
@@ -121,8 +123,17 @@ impl Generator {
             let per_worker_conns = load.connections_per_worker(worker_count);
             let worker_load = load.with_num_connections(per_worker_conns);
 
-            // server_def.tls가 true이고 TLS config가 있을 때만 TLS 사용
-            let assoc_tls = if server_def.tls { tls_client_config.clone() } else { None };
+            // server_def.tls가 true이면 프로토콜에 맞는 TLS config 선택
+            let assoc_tls = if server_def.tls {
+                match protocol {
+                    Protocol::Http2 => tls_h2_config.clone(),
+                    _ => tls_h1_config.clone(),
+                }
+            } else {
+                None
+            };
+
+            let tls_server_name = server_def.tls_server_name.clone();
 
             for worker_idx in 0..worker_count {
                 let g = Arc::clone(&global);
@@ -131,6 +142,7 @@ impl Generator {
                 let load = worker_load.clone();
                 let payload = payload.clone();
                 let tls = assoc_tls.clone();
+                let sni = tls_server_name.clone();
 
                 // 이 워커에 할당된 소스 IP (없으면 None = 바인딩 안 함)
                 let src_ip: Option<IpAddr> = ip_list
@@ -148,7 +160,7 @@ impl Generator {
                         let _ = tokio::task::spawn_blocking(move || {
                             run_pair_in_ns(
                                 test_type, &addr, protocol, payload, load,
-                                g, p, rx, duration_secs, &ns_name, tls, src_ip,
+                                g, p, rx, duration_secs, &ns_name, tls, src_ip, &sni,
                             )
                         })
                         .await;
@@ -159,7 +171,7 @@ impl Generator {
                         info!(%assoc_id, %protocol, worker_idx, ?src_ip, "Association worker starting (local mode)");
                         run_pair(
                             test_type, &addr, protocol, payload, load,
-                            g, p, rx, duration_secs, tls, src_ip,
+                            g, p, rx, duration_secs, tls, src_ip, &sni,
                         )
                         .await;
                     })
@@ -203,9 +215,10 @@ async fn run_pair(
     duration_secs: u64,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let deadline = make_deadline(duration_secs);
-    dispatch(test_type, addr, protocol, &payload, &load, global, proto, shutdown, deadline, tls, src_ip).await;
+    dispatch(test_type, addr, protocol, &payload, &load, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +238,7 @@ fn run_pair_in_ns(
     ns_name: &str,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let orig = match std::fs::File::open("/proc/self/ns/net") {
         Ok(f) => f,
@@ -254,8 +268,9 @@ fn run_pair_in_ns(
     };
 
     let deadline = make_deadline(duration_secs);
+    let sni = tls_server_name.to_string();
     rt.block_on(async move {
-        dispatch(test_type, addr, protocol, &payload, &load, global, proto, rx, deadline, tls, src_ip).await;
+        dispatch(test_type, addr, protocol, &payload, &load, global, proto, rx, deadline, tls, src_ip, &sni).await;
     });
 
     if let Err(e) = nix::sched::setns(&orig, nix::sched::CloneFlags::CLONE_NEWNET) {
@@ -279,16 +294,17 @@ async fn dispatch(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     match (protocol, payload) {
         (Protocol::Tcp, PayloadProfile::Tcp(p)) => {
             tcp::run(test_type, addr, load, p, global, proto, shutdown, deadline, src_ip).await;
         }
         (Protocol::Http1, PayloadProfile::Http(p)) => {
-            http1::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls, src_ip).await;
+            http1::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await;
         }
         (Protocol::Http2, PayloadProfile::Http(p)) => {
-            http2::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls, src_ip).await;
+            http2::run(test_type, addr, load, p, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await;
         }
         (proto, payload) => {
             tracing::error!(

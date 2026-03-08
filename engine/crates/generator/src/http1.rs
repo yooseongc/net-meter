@@ -16,6 +16,14 @@ use tracing::debug;
 type DynReader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type DynWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
+/// TLS SNI 이름을 결정한다.
+/// IP 주소 입력 시 RFC 6066 규정에 따라 "localhost"로 대체한다.
+fn resolve_tls_sni(name: &str) -> rustls::pki_types::ServerName<'static> {
+    let effective = if name.parse::<std::net::IpAddr>().is_ok() { "localhost" } else { name };
+    rustls::pki_types::ServerName::try_from(effective.to_string())
+        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap())
+}
+
 /// HTTP/1.1 트래픽 발생 진입점
 pub async fn run(
     test_type: TestType,
@@ -28,12 +36,13 @@ pub async fn run(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let num_conn = load.effective_num_connections() as usize;
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
+        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
+        TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
     }
 }
 
@@ -67,6 +76,7 @@ async fn run_cps(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
@@ -74,6 +84,7 @@ async fn run_cps(
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     if num_conn <= 1 {
         // 단일 순차 루프
@@ -84,7 +95,7 @@ async fn run_cps(
             let cycle = single_request(
                 &addr, &method, &path, req_body,
                 Arc::clone(&global), Arc::clone(&proto),
-                connect_to, response_to, tls.clone(), src_ip,
+                connect_to, response_to, tls.clone(), src_ip, &sni,
             );
             tokio::select! {
                 biased;
@@ -104,11 +115,12 @@ async fn run_cps(
             let me = method.clone();
             let pa = path.clone();
             let tls = tls.clone();
+            let sni = sni.clone();
             handles.push(tokio::spawn(async move {
                 loop {
                     if !running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
-                    single_request(&a, &me, &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip).await;
+                    single_request(&a, &me, &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip, &sni).await;
                 }
             }));
         }
@@ -136,12 +148,14 @@ async fn run_cc(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
     let method = payload.method.as_str().to_string();
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     let mut handles = Vec::with_capacity(num_conn);
     for _ in 0..num_conn {
@@ -151,9 +165,10 @@ async fn run_cc(
         let me = method.clone();
         let pa = path.clone();
         let tls = tls.clone();
+        let sni = sni.clone();
         handles.push(tokio::spawn(async move {
             // CC: body=0 (헤더만), 1초 간격 — 연결 유지에 집중
-            cc_keep_alive_session(&a, &me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip).await;
+            cc_keep_alive_session(&a, &me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip, &sni).await;
         }));
     }
 
@@ -179,6 +194,7 @@ async fn run_bw(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
@@ -186,6 +202,7 @@ async fn run_bw(
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     let mut handles = Vec::with_capacity(num_conn);
     for _ in 0..num_conn {
@@ -195,8 +212,9 @@ async fn run_bw(
         let me = method.clone();
         let pa = path.clone();
         let tls = tls.clone();
+        let sni = sni.clone();
         handles.push(tokio::spawn(async move {
-            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls, src_ip).await;
+            keep_alive_session(&a, &me, &pa, req_body, g, p, connect_to, response_to, deadline, tls, src_ip, &sni).await;
         }));
     }
 
@@ -222,6 +240,7 @@ async fn single_request(
     response_timeout: Duration,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
@@ -245,9 +264,7 @@ async fn single_request(
     // Optional TLS handshake
     let result = if let Some(cfg) = tls {
         let connector = TlsConnector::from(cfg);
-        let sn = rustls::pki_types::ServerName::try_from("localhost")
-            .unwrap()
-            .to_owned();
+        let sn = resolve_tls_sni(tls_server_name);
         match connector.connect(sn, tcp).await {
             Ok(tls_stream) => {
                 let us = connect_start.elapsed().as_micros() as u64;
@@ -377,6 +394,7 @@ async fn cc_keep_alive_session(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
@@ -402,7 +420,7 @@ async fn cc_keep_alive_session(
 
         let (mut reader, mut writer) = if let Some(cfg) = &tls {
             let connector = TlsConnector::from(Arc::clone(cfg));
-            let sn = rustls::pki_types::ServerName::try_from("localhost").unwrap().to_owned();
+            let sn = resolve_tls_sni(tls_server_name);
             match connector.connect(sn, tcp).await {
                 Ok(tls_stream) => {
                     let us = connect_start.elapsed().as_micros() as u64;
@@ -480,6 +498,7 @@ async fn keep_alive_session(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
@@ -504,9 +523,7 @@ async fn keep_alive_session(
         // Optional TLS + split into (DynReader, DynWriter)
         let (mut reader, mut writer) = if let Some(cfg) = &tls {
             let connector = TlsConnector::from(Arc::clone(cfg));
-            let sn = rustls::pki_types::ServerName::try_from("localhost")
-                .unwrap()
-                .to_owned();
+            let sn = resolve_tls_sni(tls_server_name);
             match connector.connect(sn, tcp).await {
                 Ok(tls_stream) => {
                     let us = connect_start.elapsed().as_micros() as u64;

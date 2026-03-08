@@ -152,7 +152,8 @@ impl Orchestrator {
         let pair_addrs = config.local_server_addrs();
 
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
-        let client_tls = tls_bundle.map(|b| b.client_config);
+        let client_h1_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.client_h1_config));
+        let client_h2_tls = tls_bundle.map(|b| Arc::clone(&b.client_h2_config));
 
         // 각 ServerDef마다 Responder 시작
         for server in &config.servers {
@@ -192,7 +193,7 @@ impl Orchestrator {
 
         let empty_client_ips = HashMap::new();
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls, &empty_client_ips)
+            .start(&config, global, &proto_collectors, &pair_addrs, None, client_h1_tls, client_h2_tls, &empty_client_ips)
             .await;
 
         self.transition_to_running(config, state).await;
@@ -245,7 +246,8 @@ impl Orchestrator {
         let global = Arc::clone(&state.global_metrics);
 
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
-        let client_tls = tls_bundle.map(|b| b.client_config);
+        let client_h1_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.client_h1_config));
+        let client_h2_tls = tls_bundle.map(|b| Arc::clone(&b.client_h2_config));
 
         let server_map = config.server_map();
 
@@ -289,7 +291,7 @@ impl Orchestrator {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_tls, &client_ips)
+            .start(&config, global, &proto_collectors, &pair_addrs, Some(client_ns_name), client_h1_tls, client_h2_tls, &client_ips)
             .await;
 
         self.transition_to_running(config, state).await;
@@ -356,7 +358,8 @@ impl Orchestrator {
         let tcp_quickack = config.network.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
-        let client_tls = tls_bundle.map(|b| b.client_config);
+        let client_h1_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.client_h1_config));
+        let client_h2_tls = tls_bundle.map(|b| Arc::clone(&b.client_h2_config));
         let server_map = config.server_map();
 
         // Responder: 각 server IP에 바인딩 (로컬 모드, NS 없음)
@@ -390,7 +393,7 @@ impl Orchestrator {
 
         // Generator: NS 없음, client IP 바인딩으로 실행
         self.generator
-            .start(&config, global, &proto_collectors, &pair_addrs, None, client_tls, &client_ip_lists)
+            .start(&config, global, &proto_collectors, &pair_addrs, None, client_h1_tls, client_h2_tls, &client_ip_lists)
             .await;
 
         self.transition_to_running(config, state).await;

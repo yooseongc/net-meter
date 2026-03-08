@@ -36833,9 +36833,22 @@ function ServerDialog({ server, open, onSave, onCancel }) {
         }
       ) })
     ] }),
-    !isTcp && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "flex items-center gap-2.5 text-sm cursor-pointer", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Switch, { checked: s2.tls ?? false, onCheckedChange: (v2) => setS((p2) => ({ ...p2, tls: v2 })) }),
-      "Enable TLS (self-signed cert)"
+    !isTcp && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "flex items-center gap-2.5 text-sm cursor-pointer", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Switch, { checked: s2.tls ?? false, onCheckedChange: (v2) => setS((p2) => ({ ...p2, tls: v2 })) }),
+        "Enable TLS (self-signed cert)"
+      ] }),
+      (s2.tls ?? false) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: "TLS Server Name (SNI)", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Input,
+          {
+            value: s2.tls_server_name ?? "test.net-meter.com",
+            placeholder: "test.net-meter.com",
+            onChange: (e3) => setS((p2) => ({ ...p2, tls_server_name: e3.target.value || "test.net-meter.com" }))
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground mt-1", children: 'IP 주소 입력 시 자동으로 "localhost"로 대체됩니다.' })
+      ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-2 pt-1", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { onClick: () => onSave(s2), className: "flex-1", children: "Save Server" }),

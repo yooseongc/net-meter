@@ -13,6 +13,14 @@ use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
+/// TLS SNI 이름을 결정한다.
+/// IP 주소 입력 시 RFC 6066 규정에 따라 "localhost"로 대체한다.
+fn resolve_tls_sni(name: &str) -> rustls::pki_types::ServerName<'static> {
+    let effective = if name.parse::<std::net::IpAddr>().is_ok() { "localhost" } else { name };
+    rustls::pki_types::ServerName::try_from(effective.to_string())
+        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap())
+}
+
 /// HTTP/2 트래픽 발생 진입점 (h2c 또는 TLS h2)
 pub async fn run(
     test_type: TestType,
@@ -25,13 +33,14 @@ pub async fn run(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let num_conn = load.effective_num_connections() as usize;
     let streams = payload.h2_max_concurrent_streams.unwrap_or(1) as usize;
     match test_type {
-        TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip).await,
-        TestType::Bw => run_bw(addr, load, payload, num_conn, streams, global, proto, shutdown, deadline, tls, src_ip).await,
+        TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
+        TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
+        TestType::Bw => run_bw(addr, load, payload, num_conn, streams, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
     }
 }
 
@@ -64,6 +73,7 @@ async fn run_cps(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
@@ -72,6 +82,7 @@ async fn run_cps(
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     if num_conn <= 1 {
         loop {
@@ -79,7 +90,7 @@ async fn run_cps(
             let cycle = single_request_h2(
                 &addr, &host, method.clone(), &path, req_body,
                 Arc::clone(&global), Arc::clone(&proto),
-                connect_to, response_to, tls.clone(), src_ip,
+                connect_to, response_to, tls.clone(), src_ip, &sni,
             );
             tokio::select! {
                 biased;
@@ -99,11 +110,12 @@ async fn run_cps(
             let me = method.clone();
             let pa = path.clone();
             let tls = tls.clone();
+            let sni = sni.clone();
             handles.push(tokio::spawn(async move {
                 loop {
                     if !running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
-                    single_request_h2(&a, &h, me.clone(), &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip).await;
+                    single_request_h2(&a, &h, me.clone(), &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip, &sni).await;
                 }
             }));
         }
@@ -131,6 +143,7 @@ async fn run_cc(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
@@ -138,6 +151,7 @@ async fn run_cc(
     let method = to_http_method(payload.method);
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     let mut handles = Vec::with_capacity(num_conn);
     for _ in 0..num_conn {
@@ -148,8 +162,9 @@ async fn run_cc(
         let me = method.clone();
         let pa = path.clone();
         let tls = tls.clone();
+        let sni = sni.clone();
         handles.push(tokio::spawn(async move {
-            h2_cc_worker(&a, &h, me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip).await;
+            h2_cc_worker(&a, &h, me, &pa, g, p, connect_to, response_to, deadline, tls, src_ip, &sni).await;
         }));
     }
 
@@ -176,6 +191,7 @@ async fn run_bw(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let connect_to = load.connect_timeout();
     let response_to = load.response_timeout();
@@ -184,6 +200,7 @@ async fn run_bw(
     let path = build_path(&payload.path, payload.path_extra_bytes);
     let req_body = payload.request_body_bytes.unwrap_or(0);
     let addr = addr.to_string();
+    let sni = tls_server_name.to_string();
 
     let mut handles = Vec::with_capacity(num_conn);
     for _ in 0..num_conn {
@@ -194,8 +211,9 @@ async fn run_bw(
         let me = method.clone();
         let pa = path.clone();
         let tls = tls.clone();
+        let sni = sni.clone();
         handles.push(tokio::spawn(async move {
-            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, streams_per_conn, tls, src_ip).await;
+            connection_worker(&a, &h, me, &pa, req_body, g, p, connect_to, response_to, deadline, streams_per_conn, tls, src_ip, &sni).await;
         }));
     }
 
@@ -222,12 +240,13 @@ async fn single_request_h2(
     response_timeout: Duration,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     let total_start = Instant::now();
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip)).await {
+    let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
         Ok(Ok(sr)) => {
             let us = connect_start.elapsed().as_micros() as u64;
             record_established(&global, &proto);
@@ -283,13 +302,14 @@ async fn h2_cc_worker(
     deadline: Option<Instant>,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip)).await {
+        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
             Ok(Ok(sr)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
@@ -358,13 +378,14 @@ async fn connection_worker(
     concurrent_streams: usize,
     tls: Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) {
     loop {
         if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip)).await {
+        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
             Ok(Ok(sr)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
@@ -430,14 +451,13 @@ async fn connect_h2(
     addr: &str,
     tls: &Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
+    tls_server_name: &str,
 ) -> anyhow::Result<h2::client::SendRequest<Bytes>> {
     let tcp = connect_tcp(addr, src_ip).await?;
 
     if let Some(cfg) = tls {
         let connector = TlsConnector::from(Arc::clone(cfg));
-        let sn = rustls::pki_types::ServerName::try_from("localhost")
-            .unwrap()
-            .to_owned();
+        let sn = resolve_tls_sni(tls_server_name);
         let tls_stream = connector.connect(sn, tcp).await?;
         let (send_req, conn) = h2::client::Builder::new()
             .initial_window_size(1 << 20)

@@ -25,6 +25,7 @@
 | UI-R | Frontend UI 전면 리팩터: Tailwind CSS v4 + shadcn/ui + Dark/Light 모드 | ✅ |
 | UI-1~4 | UI 개선 (레이아웃, 데이터, 버그, UX) | ✅ |
 | veth-dut | 단일 머신 External Port 검증 테스트베드 | ✅ |
+| TLS-ALPN | ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 | ✅ |
 
 ---
 
@@ -36,7 +37,7 @@
 | 항목 | 비고 |
 |------|------|
 | eBPF/XDP 옵션 계측 | 취소됨. 필요 시 aya 크레이트로 재검토 |
-| HTTP/2 TLS (h2) | h2c는 완료. ALPN 기반 TLS h2 미구현 |
+| HTTP/2 TLS (h2) | ALPN 기반 TLS h2 구현 완료 |
 | VLAN External Port 모드 검증 | 기능 구현 완료, 실장비 검증 필요 |
 | musl 빌드 검증 | 아키텍처 차원 지원 예정, 실제 musl 타깃 빌드 미검증 |
 | aarch64 빌드 지원 | x86_64 우선 지원. aarch64 확장 미검증 |
