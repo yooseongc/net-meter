@@ -80,7 +80,7 @@ latency 메트릭이 기록되지 않고 조용히 손실됨.
 
 ---
 
-### 5. Shutdown 메커니즘 불일치
+### 5. Shutdown 메커니즘 불일치 ✅ 완료
 **위치:** `generator/src/http1.rs`, `http2.rs`, `tcp.rs`
 
 **문제:**
@@ -88,8 +88,9 @@ latency 메트릭이 기록되지 않고 조용히 손실됨.
 - CC/BW 모드: `oneshot::Receiver shutdown` + `h.abort()`
 - 두 메커니즘이 혼재하여 일관성 부족
 
-**해결:** 통일된 shutdown 구조 검토.
-현재 구조상 큰 문제는 없으나, 향후 graceful shutdown 구현 시 일관성 필요.
+**해결:** CPS 병렬 모드에서 `Arc<AtomicBool>` 제거.
+`tokio::select!` 후 `h.abort()` 만 사용하는 CC/BW와 동일한 패턴으로 통일.
+워커는 deadline 체크만 수행하고, 부모가 abort()로 중단.
 
 ---
 
@@ -107,13 +108,18 @@ Generator `start()` 와 Orchestrator에서 여러 번 호출될 경우 불필요
 
 ## 낮음 (유지보수성 / 설정)
 
-### 7. HTTP 헤더 파싱 수동 구현
+### 7. HTTP 헤더 파싱 수동 구현 ✅ 완료
 **위치:** `generator/src/http1.rs`
 
 **문제:** `do_keepalive_request()` 함수가 Content-Length, Connection 헤더를
-라인 단위로 수동 파싱. 잘못된 응답 처리가 취약할 수 있음.
+`to_lowercase()` + 하드코딩 오프셋(`[15..]`, `[11..]`)으로 수동 파싱.
+- 매 헤더 라인마다 `to_lowercase()` String 할당
+- 오프셋 하드코딩으로 공백 처리 취약
+- body 읽기: `vec![0u8; len]` — Content-Length 크기만큼 단일 heap 할당
 
-**개선 방향:** `http` 크레이트의 파서 활용 또는 현재 구조 유지 + fuzz 테스트.
+**해결:**
+- `split_once(':')` + `eq_ignore_ascii_case()` 사용 — 안전한 파싱, 추가 할당 없음
+- body 읽기: 8KB 고정 스택 버퍼 루프로 변경 — 대용량 응답에서 OOM 방지
 
 ---
 
@@ -146,9 +152,9 @@ prefix 파싱 실패도 별도 오류 메시지로 분리.
 | 2 | 대용량 버퍼 폭발 수정 | ✅ 완료 | `generator/src/{http1,http2,tcp}.rs`, `responder/src/lib.rs` |
 | 3 | Orchestrator 실패 시 정리 | ✅ 완료 | `control/src/orchestrator.rs` |
 | 4 | Histogram lock 무시 | ✅ 완료 | `metrics/src/collector.rs`, `metrics/Cargo.toml` |
-| 5 | Shutdown 메커니즘 통일 | 건너뜀 (복잡도 대비 효과 미미) | `generator/src/` |
+| 5 | Shutdown 메커니즘 통일 | ✅ 완료 | `generator/src/{http1,http2,tcp}.rs` |
 | 6 | server/client_map clone | ✅ 완료 | `core/src/config.rs`, `generator/src/lib.rs`, `control/src/orchestrator.rs` |
-| 7 | HTTP 헤더 파싱 개선 | 건너뜀 (정상 동작 중, fuzz 테스트로 대체 가능) | `generator/src/http1.rs` |
+| 7 | HTTP 헤더 파싱 개선 | ✅ 완료 | `generator/src/http1.rs` |
 | 8 | 채널 크기 하드코딩 | ✅ 완료 | `control/src/state.rs` |
 | 9 | parse_cidr 폴백 | ✅ 완료 | `core/src/config.rs` |
 | 10 | NS setup 롤백 | ✅ 완료 | `ns/src/manager.rs` |

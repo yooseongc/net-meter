@@ -86,11 +86,9 @@ async fn run_cps(
             }
         }
     } else {
-        // 병렬 루프
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // 병렬 루프 — CC/BW와 동일하게 abort()로 중단
         let mut handles = Vec::with_capacity(num_conn);
         for _ in 0..num_conn {
-            let running = Arc::clone(&running);
             let g = Arc::clone(&global);
             let p = Arc::clone(&proto);
             let a = addr.clone();
@@ -100,7 +98,6 @@ async fn run_cps(
             let sni = sni.clone();
             handles.push(tokio::spawn(async move {
                 loop {
-                    if !running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
                     single_request(&a, &me, &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip, &sni).await;
                 }
@@ -110,7 +107,6 @@ async fn run_cps(
             _ = &mut shutdown => {}
             _ = wait_deadline(deadline) => {}
         }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
         for h in handles { h.abort(); }
     }
 }
@@ -628,18 +624,27 @@ async fn do_keepalive_request(
         let trimmed = line.trim_end();
         if trimmed.is_empty() { break; }
 
-        let lower = trimmed.to_lowercase();
-        if lower.starts_with("content-length:") {
-            content_length = trimmed[15..].trim().parse().ok();
-        } else if lower.starts_with("connection:") {
-            server_keep_alive = trimmed[11..].trim().to_lowercase() != "close";
+        // split_once(':') + eq_ignore_ascii_case: 안전한 파싱, String 할당 없음
+        if let Some((name, value)) = trimmed.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().ok();
+            } else if name.eq_ignore_ascii_case("connection") {
+                server_keep_alive = !value.eq_ignore_ascii_case("close");
+            }
         }
     }
 
     let reuse = if let Some(len) = content_length {
         if len > 0 {
-            let mut body = vec![0u8; len];
-            reader.read_exact(&mut body).await?;
+            // 고정 크기 버퍼 루프로 읽기 — 단일 Vec 할당 방지
+            let mut remaining = len;
+            let mut buf = [0u8; 8192];
+            while remaining > 0 {
+                let to_read = remaining.min(buf.len());
+                reader.read_exact(&mut buf[..to_read]).await?;
+                remaining -= to_read;
+            }
             total_rx += len as u64;
         }
         server_keep_alive

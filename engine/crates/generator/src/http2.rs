@@ -81,10 +81,9 @@ async fn run_cps(
             }
         }
     } else {
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // 병렬 루프 — CC/BW와 동일하게 abort()로 중단
         let mut handles = Vec::with_capacity(num_conn);
         for _ in 0..num_conn {
-            let running = Arc::clone(&running);
             let g = Arc::clone(&global);
             let p = Arc::clone(&proto);
             let a = addr.clone();
@@ -95,7 +94,6 @@ async fn run_cps(
             let sni = sni.clone();
             handles.push(tokio::spawn(async move {
                 loop {
-                    if !running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
                     single_request_h2(&a, &h, me.clone(), &pa, req_body, Arc::clone(&g), Arc::clone(&p), connect_to, response_to, tls.clone(), src_ip, &sni).await;
                 }
@@ -105,7 +103,6 @@ async fn run_cps(
             _ = &mut shutdown => {}
             _ = wait_deadline(deadline) => {}
         }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
         for h in handles { h.abort(); }
     }
 }
