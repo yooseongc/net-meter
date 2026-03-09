@@ -126,7 +126,11 @@ fn spawn_http_server(
     proto: Arc<Collector>,
     tls_config: Option<Arc<ServerConfig>>,
 ) -> JoinHandle<()> {
-    let tls_acceptor = tls_config.map(|cfg| TlsAcceptor::from(cfg));
+    let tls_acceptor = tls_config.map(TlsAcceptor::from);
+
+    // 응답 body를 서버 시작 시 한 번만 할당하여 모든 요청에서 Arc::clone으로 재사용.
+    // Bytes::clone()은 O(1) (내부 참조 카운트 증가만) 이므로 per-request 할당이 없다.
+    let shared_body = Arc::new(Bytes::from(vec![b'x'; body_size]));
 
     tokio::spawn(async move {
         // JoinSet으로 per-connection 태스크를 추적한다.
@@ -152,6 +156,7 @@ fn spawn_http_server(
 
                     let g = Arc::clone(&global);
                     let p = Arc::clone(&proto);
+                    let body = Arc::clone(&shared_body);
 
                     if let Some(ref acceptor) = tls_acceptor {
                         let acceptor = acceptor.clone();
@@ -163,11 +168,11 @@ fn spawn_http_server(
                                     return;
                                 }
                             };
-                            serve_http(TokioIo::new(tls_stream), is_h2, body_size, g, p, peer).await;
+                            serve_http(TokioIo::new(tls_stream), is_h2, body, g, p, peer).await;
                         });
                     } else {
                         conn_tasks.spawn(async move {
-                            serve_http(TokioIo::new(stream), is_h2, body_size, g, p, peer).await;
+                            serve_http(TokioIo::new(stream), is_h2, body, g, p, peer).await;
                         });
                     }
                 }
@@ -182,7 +187,7 @@ fn spawn_http_server(
 async fn serve_http<I>(
     io: I,
     is_h2: bool,
-    body_size: usize,
+    body: Arc<Bytes>,
     global: Arc<Collector>,
     proto: Arc<Collector>,
     peer: std::net::SocketAddr,
@@ -193,7 +198,8 @@ async fn serve_http<I>(
         let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
             let g2 = Arc::clone(&global);
             let p2 = Arc::clone(&proto);
-            async move { handle_http(req, g2, p2, body_size).await }
+            let body = Arc::clone(&body);
+            async move { handle_http(req, g2, p2, body).await }
         });
         if let Err(e) = http2::Builder::new(TokioExecutor::new())
             .serve_connection(io, svc)
@@ -205,7 +211,8 @@ async fn serve_http<I>(
         let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
             let g2 = Arc::clone(&global);
             let p2 = Arc::clone(&proto);
-            async move { handle_http(req, g2, p2, body_size).await }
+            let body = Arc::clone(&body);
+            async move { handle_http(req, g2, p2, body).await }
         });
         if let Err(e) = http1::Builder::new()
             .keep_alive(true)
@@ -221,7 +228,7 @@ async fn handle_http(
     req: Request<hyper::body::Incoming>,
     global: Arc<Collector>,
     proto: Arc<Collector>,
-    body_size: usize,
+    body: Arc<Bytes>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Content-Length 헤더에서 클라이언트가 전송한 요청 body 크기를 파악
     let req_bytes = req
@@ -231,9 +238,11 @@ async fn handle_http(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let body = Bytes::from(vec![b'x'; body_size]);
-    global.record_server_request(body_size as u64);
-    proto.record_server_request(body_size as u64);
+    let body_len = body.len();
+    // Bytes::clone() = O(1): 내부 Arc 카운트 증가 + 포인터 복사만 수행
+    let body_bytes = (*body).clone();
+    global.record_server_request(body_len as u64);
+    proto.record_server_request(body_len as u64);
     if req_bytes > 0 {
         global.record_server_rx(req_bytes);
         proto.record_server_rx(req_bytes);
@@ -242,8 +251,8 @@ async fn handle_http(
     Ok(Response::builder()
         .status(200)
         .header("Content-Type", "application/octet-stream")
-        .header("Content-Length", body_size.to_string())
-        .body(Full::new(body))
+        .header("Content-Length", body_len.to_string())
+        .body(Full::new(body_bytes))
         .unwrap())
 }
 

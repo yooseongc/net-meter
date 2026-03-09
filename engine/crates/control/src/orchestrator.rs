@@ -105,6 +105,8 @@ impl Orchestrator {
                     Ok(()) => {}
                     Err(e) => {
                         error!(error = %e, "Failed to start test in namespace mode");
+                        // 부분적으로 시작된 Responder 핸들 정리
+                        self.responder.stop_all();
                         *state.test_state.write().await = TestState::Failed;
                         let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                     }
@@ -118,6 +120,8 @@ impl Orchestrator {
                     Ok(()) => {}
                     Err(e) => {
                         error!(error = %e, "Failed to start test in local mode");
+                        // 부분적으로 시작된 Responder 핸들 정리
+                        self.responder.stop_all();
                         *state.test_state.write().await = TestState::Failed;
                         let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                     }
@@ -131,6 +135,12 @@ impl Orchestrator {
                     Ok(()) => {}
                     Err(e) => {
                         error!(error = %e, "Failed to start test in external port mode");
+                        // 부분적으로 시작된 Responder 핸들 정리
+                        self.responder.stop_all();
+                        // 정책 라우팅이 이미 설정됐을 경우 정리
+                        if let Some(ps) = state.ext_policy_routing.lock().await.take() {
+                            net_meter_ns::teardown_policy_routing(&ps).await;
+                        }
                         *state.test_state.write().await = TestState::Failed;
                         let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                     }

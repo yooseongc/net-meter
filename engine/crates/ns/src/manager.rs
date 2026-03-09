@@ -50,6 +50,8 @@ impl NamespaceManager {
     ///
     /// 호스트 측 upper/lower 인터페이스를 브릿지/스위치로 연결하는 것은
     /// 운영자의 책임이다 (프로그램 시작 전에 미리 설정해야 함).
+    ///
+    /// 중간에 실패하면 이미 생성된 리소스를 자동으로 롤백한다.
     pub async fn setup(&mut self) -> Result<(), NetMeterError> {
         info!(
             client_ns = %self.client_ns,
@@ -59,6 +61,15 @@ impl NamespaceManager {
             "Setting up network namespaces (veth pairs only — bridge is operator's responsibility)"
         );
 
+        if let Err(e) = self.setup_inner().await {
+            warn!(error = %e, "Namespace setup failed, rolling back created resources");
+            self.cleanup_resources().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn setup_inner(&mut self) -> Result<(), NetMeterError> {
         // 1. namespace 생성
         create_ns(&self.client_ns).await?;
         create_ns(&self.server_ns).await?;
@@ -80,6 +91,24 @@ impl NamespaceManager {
         self.ready = true;
         info!("Network namespaces ready (connect {} ↔ {} via bridge/switch manually)", self.upper_iface, self.lower_iface);
         Ok(())
+    }
+
+    /// 생성된 리소스(link, namespace)를 정리한다.
+    ///
+    /// `ready` 상태와 무관하게 호출 가능하다. 존재하지 않는 리소스 삭제 실패는
+    /// 경고 로그만 출력하고 계속 진행한다.
+    async fn cleanup_resources(&mut self) {
+        for iface in [self.upper_iface.as_str(), self.lower_iface.as_str()] {
+            if let Err(e) = delete_link(iface).await {
+                warn!(iface, error = %e, "Failed to delete link during cleanup");
+            }
+        }
+        for ns in [self.client_ns.clone(), self.server_ns.clone()] {
+            if let Err(e) = delete_ns(&ns).await {
+                warn!(ns = %ns, error = %e, "Failed to delete namespace during cleanup");
+            }
+        }
+        self.ready = false;
     }
 
     /// ClientDef/ServerDef/Association으로부터 IP를 할당한다.
@@ -235,20 +264,7 @@ impl NamespaceManager {
             return;
         }
         info!("Tearing down network namespaces");
-
-        // veth pair 삭제 (브릿지 포트 자동 해제됨)
-        for iface in [self.upper_iface.as_str(), self.lower_iface.as_str()] {
-            if let Err(e) = delete_link(iface).await {
-                warn!(iface, error = %e, "Failed to delete link");
-            }
-        }
-        for ns in [&self.client_ns.clone(), &self.server_ns.clone()] {
-            if let Err(e) = delete_ns(ns).await {
-                warn!(ns, error = %e, "Failed to delete namespace");
-            }
-        }
-
-        self.ready = false;
+        self.cleanup_resources().await;
         info!("Network namespaces cleaned up");
     }
 

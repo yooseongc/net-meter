@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,19 +7,15 @@ use http::{Method, Request};
 use net_meter_core::{HttpMethod, HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use rustls::ClientConfig;
-use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
-/// TLS SNI 이름을 결정한다.
-/// IP 주소 입력 시 RFC 6066 규정에 따라 "localhost"로 대체한다.
-fn resolve_tls_sni(name: &str) -> rustls::pki_types::ServerName<'static> {
-    let effective = if name.parse::<std::net::IpAddr>().is_ok() { "localhost" } else { name };
-    rustls::pki_types::ServerName::try_from(effective.to_string())
-        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap())
-}
+use crate::common::{
+    self, build_path, connect_tcp, record_attempt, record_established, record_failed,
+    record_response, record_timeout, resolve_tls_sni, wait_deadline,
+};
 
 /// HTTP/2 트래픽 발생 진입점 (h2c 또는 TLS h2)
 pub async fn run(
@@ -41,20 +37,6 @@ pub async fn run(
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
         TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
         TestType::Bw => run_bw(addr, load, payload, num_conn, streams, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
-    }
-}
-
-/// src_ip를 bind한 TCP 연결 수립
-async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpStream> {
-    if let Some(src) = src_ip {
-        let server_addr: SocketAddr = addr
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let sock = TcpSocket::new_v4()?;
-        sock.bind(SocketAddr::new(src, 0))?;
-        sock.connect(server_addr).await
-    } else {
-        TcpStream::connect(addr).await
     }
 }
 
@@ -506,11 +488,20 @@ async fn send_h2_stream(
         .send_request(request, end_stream)
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let mut tx_bytes: u64 = 64;
+    // 대용량 body를 64KiB 청크 단위로 전송 — 정적 버퍼를 zero-copy 참조
+    let mut tx_bytes: u64 = 64; // 헤더 근사값
     if req_body_bytes > 0 {
-        let body = Bytes::from(vec![0u8; req_body_bytes]);
-        tx_bytes += body.len() as u64;
-        send_stream.send_data(body, true).map_err(|e| anyhow::anyhow!(e))?;
+        let mut remaining = req_body_bytes;
+        while remaining > 0 {
+            let n = remaining.min(common::SEND_CHUNK_SIZE);
+            let end = n == remaining;
+            // from_static: 정적 배열 참조 — 추가 할당 없음
+            send_stream
+                .send_data(Bytes::from_static(&common::ZERO_CHUNK[..n]), end)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            remaining -= n;
+        }
+        tx_bytes += req_body_bytes as u64;
     }
     global.record_request(tx_bytes);
     proto.record_request(tx_bytes);
@@ -534,13 +525,6 @@ async fn send_h2_stream(
     Ok((status, bytes_rx))
 }
 
-fn build_path(base: &str, extra_bytes: Option<usize>) -> String {
-    match extra_bytes {
-        None | Some(0) => base.to_string(),
-        Some(n) => format!("{}?x={}", base, "a".repeat(n)),
-    }
-}
-
 fn to_http_method(method: HttpMethod) -> Method {
     match method {
         HttpMethod::Get => Method::GET,
@@ -548,26 +532,4 @@ fn to_http_method(method: HttpMethod) -> Method {
     }
 }
 
-#[inline] fn record_attempt(g: &Collector, p: &Collector) {
-    g.record_connection_attempt(); p.record_connection_attempt();
-}
-#[inline] fn record_established(g: &Collector, p: &Collector) {
-    g.record_connection_established(); p.record_connection_established();
-}
-#[inline] fn record_failed(g: &Collector, p: &Collector) {
-    g.record_connection_failed(); p.record_connection_failed();
-}
-#[inline] fn record_timeout(g: &Collector, p: &Collector) {
-    g.record_timeout(); p.record_timeout();
-}
-#[inline] fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, us: u64) {
-    g.record_response(status, bytes, us); p.record_response(status, bytes, us);
-}
-
-async fn wait_deadline(deadline: Option<Instant>) {
-    if let Some(dl) = deadline {
-        tokio::time::sleep(dl.saturating_duration_since(Instant::now())).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
+// connect_tcp, wait_deadline, record_*, build_path, resolve_tls_sni → crate::common 사용

@@ -1,14 +1,18 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use net_meter_core::{LoadConfig, TcpPayload, TestType};
 use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::debug;
+
+use crate::common::{
+    self, connect_tcp, record_attempt, record_established, record_failed, record_response,
+    record_timeout, wait_deadline,
+};
 
 /// TCP 트래픽 발생 진입점
 pub async fn run(
@@ -27,20 +31,6 @@ pub async fn run(
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
         TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
         TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, src_ip).await,
-    }
-}
-
-/// src_ip를 bind한 TCP 연결 수립
-async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpStream> {
-    if let Some(src) = src_ip {
-        let server_addr: SocketAddr = addr
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let sock = TcpSocket::new_v4()?;
-        sock.bind(SocketAddr::new(src, 0))?;
-        sock.connect(server_addr).await
-    } else {
-        TcpStream::connect(addr).await
     }
 }
 
@@ -238,15 +228,15 @@ async fn tcp_pingpong(
 }
 
 async fn do_pingpong(
-    mut stream: TcpStream,
+    mut stream: tokio::net::TcpStream,
     tx_bytes: usize,
     rx_bytes: usize,
     global: &Arc<Collector>,
     proto: &Arc<Collector>,
 ) -> std::io::Result<u64> {
+    // 대용량 송신도 64KiB 청크 단위로 처리 — 단일 Vec 할당 방지
     if tx_bytes > 0 {
-        let buf = vec![0u8; tx_bytes];
-        stream.write_all(&buf).await?;
+        common::write_zeroes(&mut stream, tx_bytes).await?;
         let tx = tx_bytes as u64;
         global.record_request(tx);
         proto.record_request(tx);
@@ -254,11 +244,13 @@ async fn do_pingpong(
 
     let ttfb_start = Instant::now();
     let mut total_rx = 0u64;
-    let mut buf = vec![0u8; 65536];
+    // 8KiB 고정 읽기 버퍼 — 루프로 rx_bytes 전체 수신
+    let mut buf = vec![0u8; 8192];
     let mut first = true;
 
     while total_rx < rx_bytes as u64 {
-        let n = stream.read(&mut buf).await?;
+        let to_read = ((rx_bytes as u64 - total_rx) as usize).min(buf.len());
+        let n = stream.read(&mut buf[..to_read]).await?;
         if n == 0 { break; }
         if first {
             let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
@@ -276,7 +268,7 @@ async fn do_pingpong(
 // CC 워커: connect → 연결 유지 (데이터 전송 최소화) → deadline
 //
 // payload=0 이면 순수 idle 연결 유지 (TCP_KEEPALIVE 의존).
-// payload>0 이면 connect/close 루프 대신 연결 유지하며 주기적 소량 교환.
+// payload>0 이면 연결 유지하며 주기적 소량 교환.
 // ---------------------------------------------------------------------------
 
 async fn tcp_cc_worker(
@@ -321,28 +313,30 @@ async fn tcp_cc_worker(
         // 연결 유지: payload가 없으면 순수 idle, 있으면 1초 간격으로 소량 교환
         if tx_bytes == 0 && rx_bytes == 0 {
             // idle 유지: 100ms 마다 deadline 체크
-            let _ = stream; // move into scope for lifetime
+            let _ = stream;
             loop {
                 if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         } else {
-            let chunk = if tx_bytes > 0 { vec![0u8; tx_bytes] } else { vec![] };
-            let mut rx_buf = if rx_bytes > 0 { vec![0u8; rx_bytes.max(65536)] } else { vec![] };
+            // 64KiB 고정 IO 버퍼 — 연결 수명 동안 재사용
+            let mut io_buf = vec![0u8; common::SEND_CHUNK_SIZE];
             let mut stream = stream;
             loop {
                 if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
                 let total_start = Instant::now();
 
-                if !chunk.is_empty() {
-                    if stream.write_all(&chunk).await.is_err() { break; }
-                    global.record_request(chunk.len() as u64);
-                    proto.record_request(chunk.len() as u64);
+                // 대용량 송신도 청크 단위 — 단일 Vec 할당 방지
+                if tx_bytes > 0 {
+                    if common::write_zeroes(&mut stream, tx_bytes).await.is_err() { break; }
+                    global.record_request(tx_bytes as u64);
+                    proto.record_request(tx_bytes as u64);
                 }
-                if !rx_buf.is_empty() {
+                if rx_bytes > 0 {
                     let mut received = 0usize;
                     loop {
-                        match stream.read(&mut rx_buf[received..]).await {
+                        let to_read = (rx_bytes - received).min(io_buf.len());
+                        match stream.read(&mut io_buf[..to_read]).await {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 received += n;
@@ -363,7 +357,7 @@ async fn tcp_cc_worker(
 }
 
 // ---------------------------------------------------------------------------
-// BW 워커 (구 stream_worker): connect → loop { send + recv } → deadline
+// BW 워커: connect → loop { send + recv } → deadline
 // ---------------------------------------------------------------------------
 
 async fn tcp_bw_worker(
@@ -405,29 +399,35 @@ async fn tcp_bw_worker(
         };
 
         let _guard = ActiveConnectionGuard::new(Arc::clone(&global), Arc::clone(&proto));
-        let chunk = if tx_bytes > 0 { vec![0u8; tx_bytes] } else { vec![] };
-        let mut rx_buf = if rx_bytes > 0 { vec![0u8; rx_bytes.max(65536)] } else { vec![] };
+        // 64KiB 고정 IO 버퍼 — 연결 수명 동안 재사용
+        let mut io_buf = vec![0u8; common::SEND_CHUNK_SIZE];
 
         loop {
             if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
 
             let total_start = Instant::now();
 
-            if !chunk.is_empty() {
-                if stream.write_all(&chunk).await.is_err() { break; }
-                let tx = chunk.len() as u64;
+            // 대용량 송신도 청크 단위 — 단일 Vec 할당 방지
+            if tx_bytes > 0 {
+                if stream.write_all(&common::ZERO_CHUNK[..tx_bytes.min(common::SEND_CHUNK_SIZE)]).await.is_err() { break; }
+                // tx_bytes > SEND_CHUNK_SIZE인 경우 나머지 청크 전송
+                if tx_bytes > common::SEND_CHUNK_SIZE {
+                    if common::write_zeroes(&mut stream, tx_bytes - common::SEND_CHUNK_SIZE).await.is_err() { break; }
+                }
+                let tx = tx_bytes as u64;
                 global.record_request(tx);
                 proto.record_request(tx);
             }
 
-            if !rx_buf.is_empty() {
+            if rx_bytes > 0 {
                 let mut received = 0usize;
                 let first_byte_start = Instant::now();
                 let mut first = true;
 
                 while received < rx_bytes {
-                    match stream.read(&mut rx_buf[received..]).await {
-                        Ok(0) => { break; }
+                    let to_read = (rx_bytes - received).min(io_buf.len());
+                    match stream.read(&mut io_buf[..to_read]).await {
+                        Ok(0) => break,
                         Ok(n) => {
                             if first {
                                 let ttfb_us = first_byte_start.elapsed().as_micros() as u64;
@@ -437,12 +437,12 @@ async fn tcp_bw_worker(
                             }
                             received += n;
                         }
-                        Err(_) => { break; }
+                        Err(_) => break,
                     }
                 }
                 let total_us = total_start.elapsed().as_micros() as u64;
                 record_response(&global, &proto, 0, received as u64, total_us);
-            } else if !chunk.is_empty() {
+            } else if tx_bytes > 0 {
                 let total_us = total_start.elapsed().as_micros() as u64;
                 record_response(&global, &proto, 0, 0, total_us);
             } else {
@@ -453,46 +453,4 @@ async fn tcp_bw_worker(
     }
 }
 
-// ---------------------------------------------------------------------------
-// 헬퍼
-// ---------------------------------------------------------------------------
-
-#[inline]
-fn record_attempt(g: &Collector, p: &Collector) {
-    g.record_connection_attempt();
-    p.record_connection_attempt();
-}
-
-#[inline]
-fn record_established(g: &Collector, p: &Collector) {
-    g.record_connection_established();
-    p.record_connection_established();
-}
-
-#[inline]
-fn record_failed(g: &Collector, p: &Collector) {
-    g.record_connection_failed();
-    p.record_connection_failed();
-}
-
-#[inline]
-fn record_timeout(g: &Collector, p: &Collector) {
-    g.record_timeout();
-    p.record_timeout();
-}
-
-
-#[inline]
-fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, latency_us: u64) {
-    g.record_response(status, bytes, latency_us);
-    p.record_response(status, bytes, latency_us);
-}
-
-async fn wait_deadline(deadline: Option<Instant>) {
-    if let Some(dl) = deadline {
-        let remaining = dl.saturating_duration_since(Instant::now());
-        tokio::time::sleep(remaining).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
+// connect_tcp, wait_deadline, record_* → crate::common 사용

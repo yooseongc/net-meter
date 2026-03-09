@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -6,23 +6,19 @@ use net_meter_core::{HttpPayload, LoadConfig, TestType};
 use net_meter_metrics::{ActiveConnectionGuard, Collector};
 use rustls::ClientConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
+use crate::common::{
+    self, build_path, connect_tcp, record_attempt, record_established, record_failed,
+    record_response, record_timeout, resolve_tls_sni, wait_deadline,
+};
+
 // boxed reader/writer — TLS와 평문 스트림을 통합 처리
 type DynReader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type DynWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
-
-/// TLS SNI 이름을 결정한다.
-/// IP 주소 입력 시 RFC 6066 규정에 따라 "localhost"로 대체한다.
-fn resolve_tls_sni(name: &str) -> rustls::pki_types::ServerName<'static> {
-    let effective = if name.parse::<std::net::IpAddr>().is_ok() { "localhost" } else { name };
-    rustls::pki_types::ServerName::try_from(effective.to_string())
-        .unwrap_or_else(|_| rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap())
-}
 
 /// HTTP/1.1 트래픽 발생 진입점
 pub async fn run(
@@ -43,20 +39,6 @@ pub async fn run(
         TestType::Cps => run_cps(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
         TestType::Cc => run_cc(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
         TestType::Bw => run_bw(addr, load, payload, num_conn, global, proto, shutdown, deadline, tls, src_ip, tls_server_name).await,
-    }
-}
-
-/// src_ip를 bind한 TCP 연결 수립
-async fn connect_tcp(addr: &str, src_ip: Option<IpAddr>) -> std::io::Result<TcpStream> {
-    if let Some(src) = src_ip {
-        let server_addr: SocketAddr = addr
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let sock = TcpSocket::new_v4()?;
-        sock.bind(SocketAddr::new(src, 0))?;
-        sock.connect(server_addr).await
-    } else {
-        TcpStream::connect(addr).await
     }
 }
 
@@ -339,9 +321,9 @@ where
     };
     stream.write_all(header.as_bytes()).await?;
 
+    // 대용량 body도 64KiB 청크 단위로 전송 — 단일 Vec 할당 방지
     if req_body_bytes > 0 {
-        let body = vec![0u8; req_body_bytes];
-        stream.write_all(&body).await?;
+        common::write_zeroes(&mut stream, req_body_bytes).await?;
     }
 
     let tx = (header.len() + req_body_bytes) as u64;
@@ -607,10 +589,12 @@ async fn do_keepalive_request(
         )
     };
     writer.write_all(header.as_bytes()).await?;
+
+    // 대용량 body도 64KiB 청크 단위로 전송 — 단일 Vec 할당 방지
     if req_body_bytes > 0 {
-        let body = vec![0u8; req_body_bytes];
-        writer.write_all(&body).await?;
+        common::write_zeroes(writer, req_body_bytes).await?;
     }
+
     let tx = (header.len() + req_body_bytes) as u64;
     global.record_request(tx);
     proto.record_request(tx);
@@ -664,39 +648,4 @@ async fn do_keepalive_request(
     };
 
     Ok((status_code, total_rx, reuse))
-}
-
-// ---------------------------------------------------------------------------
-// 헬퍼
-// ---------------------------------------------------------------------------
-
-fn build_path(base: &str, extra_bytes: Option<usize>) -> String {
-    match extra_bytes {
-        None | Some(0) => base.to_string(),
-        Some(n) => format!("{}?x={}", base, "a".repeat(n)),
-    }
-}
-
-#[inline] fn record_attempt(g: &Collector, p: &Collector) {
-    g.record_connection_attempt(); p.record_connection_attempt();
-}
-#[inline] fn record_established(g: &Collector, p: &Collector) {
-    g.record_connection_established(); p.record_connection_established();
-}
-#[inline] fn record_failed(g: &Collector, p: &Collector) {
-    g.record_connection_failed(); p.record_connection_failed();
-}
-#[inline] fn record_timeout(g: &Collector, p: &Collector) {
-    g.record_timeout(); p.record_timeout();
-}
-#[inline] fn record_response(g: &Collector, p: &Collector, status: u16, bytes: u64, us: u64) {
-    g.record_response(status, bytes, us); p.record_response(status, bytes, us);
-}
-
-async fn wait_deadline(deadline: Option<Instant>) {
-    if let Some(dl) = deadline {
-        tokio::time::sleep(dl.saturating_duration_since(Instant::now())).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
 }
