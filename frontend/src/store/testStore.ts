@@ -10,7 +10,7 @@ import {
   connectMetricsWs,
 } from '../api/client'
 
-const MAX_HISTORY = 300
+const MAX_HISTORY = 600  // 10분 (1초 간격 스냅샷 기준)
 const MAX_EVENTS = 100
 
 // B-1: localStorage 기반 프로파일 관리
@@ -232,9 +232,12 @@ export const useTestStore = create<TestStore>((set, get) => ({
     wsInstance = connectMetricsWs(
       (snap) => {
         set((s) => {
-          const history = [...s.snapshotHistory, snap]
-          if (history.length > MAX_HISTORY) history.shift()
-          return { latestSnapshot: snap, snapshotHistory: history, wsConnected: true }
+          // shift() 대신 slice()로 교체: shift는 O(n) 원소 이동, slice는 단순 범위 복사
+          const prev = s.snapshotHistory
+          const newHistory = prev.length >= MAX_HISTORY
+            ? prev.slice(1).concat(snap)
+            : prev.concat(snap)
+          return { latestSnapshot: snap, snapshotHistory: newHistory, wsConnected: true }
         })
         // C-1: active 상태일 때만 fetchStatus 폴링
         if (ACTIVE_STATES.includes(get().testState)) {
@@ -253,9 +256,13 @@ export const useTestStore = create<TestStore>((set, get) => ({
         (ev) => {
           const entry = eventToEntry(ev)
           set((s) => {
-            const log = [entry, ...s.eventLog]
-            if (log.length > MAX_EVENTS) log.length = MAX_EVENTS
-            return { eventLog: log }
+            // 최신 항목을 앞에 추가하면서 최대 크기 초과 시 마지막 항목을 제거
+            // log.length 직접 설정 대신 slice로 크기를 미리 결정해 불필요한 할당 방지
+            const prev = s.eventLog
+            const newLog = prev.length >= MAX_EVENTS
+              ? [entry, ...prev.slice(0, MAX_EVENTS - 1)]
+              : [entry, ...prev]
+            return { eventLog: newLog }
           })
           // C-1: 상태 전환 이벤트 시 동기화
           if (

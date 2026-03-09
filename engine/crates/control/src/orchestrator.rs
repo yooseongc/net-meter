@@ -35,6 +35,13 @@ impl Orchestrator {
 
     /// 시험을 시작한다.
     pub async fn start(&mut self, config: TestConfig, state: Arc<AppState>) {
+        // 설정 검증 — 런타임 오류를 조기에 방지
+        if let Err(e) = config.validate() {
+            *state.test_state.write().await = TestState::Failed;
+            let _ = state.event_tx.send(TestEvent::Error { message: format!("Config validation failed: {}", e) });
+            return;
+        }
+
         *state.test_state.write().await = TestState::Preparing;
         *state.active_config.write().await = Some(config.clone());
         *state.test_start_time.write().await = Some(Instant::now());
@@ -106,7 +113,7 @@ impl Orchestrator {
                     Err(e) => {
                         error!(error = %e, "Failed to start test in namespace mode");
                         // 부분적으로 시작된 Responder 핸들 정리
-                        self.responder.stop_all();
+                        self.responder.stop_all().await;
                         *state.test_state.write().await = TestState::Failed;
                         let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                     }
@@ -121,7 +128,7 @@ impl Orchestrator {
                     Err(e) => {
                         error!(error = %e, "Failed to start test in local mode");
                         // 부분적으로 시작된 Responder 핸들 정리
-                        self.responder.stop_all();
+                        self.responder.stop_all().await;
                         *state.test_state.write().await = TestState::Failed;
                         let _ = state.event_tx.send(TestEvent::Error { message: e.to_string() });
                     }
@@ -136,7 +143,7 @@ impl Orchestrator {
                     Err(e) => {
                         error!(error = %e, "Failed to start test in external port mode");
                         // 부분적으로 시작된 Responder 핸들 정리
-                        self.responder.stop_all();
+                        self.responder.stop_all().await;
                         // 정책 라우팅이 이미 설정됐을 경우 정리
                         if let Some(ps) = state.ext_policy_routing.lock().await.take() {
                             net_meter_ns::teardown_policy_routing(&ps).await;
@@ -496,7 +503,7 @@ impl Orchestrator {
         info!("Stopping test");
 
         self.generator.stop().await;
-        self.responder.stop_all();
+        self.responder.stop_all().await;
 
         // External Port 모드: 정책 라우팅 정리
         if state.server_net.mode == NetworkMode::ExternalPort {

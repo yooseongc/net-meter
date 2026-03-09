@@ -296,8 +296,9 @@ export function connectEventStream(
     try {
       const event = JSON.parse(ev.data) as TestEventType
       onEvent(event)
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // 파싱 실패 시 조용히 드롭하지 않고 경고 — 백엔드 스키마 불일치 디버깅용
+      console.warn('[net-meter] SSE event parse failed:', e, '| raw:', ev.data?.slice(0, 200))
     }
   }
   es.onerror = () => onError?.()
@@ -315,8 +316,9 @@ export function connectMetricsWs(
     try {
       const snap = JSON.parse(ev.data) as MetricsSnapshot
       onSnapshot(snap)
-    } catch {
-      /* ignore parse errors */
+    } catch (e) {
+      // 파싱 실패 시 조용히 드롭하지 않고 경고 — 백엔드 스키마 불일치 디버깅용
+      console.warn('[net-meter] WS metrics parse failed:', e, '| raw:', ev.data?.slice(0, 200))
     }
   }
   ws.onclose = () => onClose?.()

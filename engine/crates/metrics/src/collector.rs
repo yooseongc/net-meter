@@ -118,19 +118,27 @@ impl Collector {
     /// TCP connect latency 기록 (microseconds)
     #[inline]
     pub fn record_connect_latency(&self, us: u64) {
-        match self.connect_hist.lock() {
-            Ok(mut h) => { let _ = h.record(us.max(1)); }
-            Err(e) => warn!("connect_hist lock poisoned (worker panicked?): {}", e),
-        }
+        let mut h = match self.connect_hist.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("connect_hist lock poisoned — recovering");
+                e.into_inner()
+            }
+        };
+        let _ = h.record(us.max(1));
     }
 
     /// TTFB 기록 (microseconds): 요청 전송 완료 → 첫 응답 바이트
     #[inline]
     pub fn record_ttfb(&self, us: u64) {
-        match self.ttfb_hist.lock() {
-            Ok(mut h) => { let _ = h.record(us.max(1)); }
-            Err(e) => warn!("ttfb_hist lock poisoned (worker panicked?): {}", e),
-        }
+        let mut h = match self.ttfb_hist.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("ttfb_hist lock poisoned — recovering");
+                e.into_inner()
+            }
+        };
+        let _ = h.record(us.max(1));
     }
 
     #[inline]
@@ -166,16 +174,24 @@ impl Collector {
         };
 
         if status > 0 {
-            match self.status_code_breakdown.lock() {
-                Ok(mut map) => { *map.entry(status).or_insert(0) += 1; }
-                Err(e) => warn!("status_code_breakdown lock poisoned (worker panicked?): {}", e),
-            }
+            let mut map = match self.status_code_breakdown.lock() {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("status_code_breakdown lock poisoned — recovering");
+                    e.into_inner()
+                }
+            };
+            *map.entry(status).or_insert(0) += 1;
         }
 
-        match self.latency_hist.lock() {
-            Ok(mut h) => { let _ = h.record(latency_us.max(1)); }
-            Err(e) => warn!("latency_hist lock poisoned (worker panicked?): {}", e),
-        }
+        let mut h = match self.latency_hist.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("latency_hist lock poisoned — recovering");
+                e.into_inner()
+            }
+        };
+        let _ = h.record(latency_us.max(1));
     }
 
     /// 현재 누적값으로 MetricsSnapshot 생성
@@ -299,24 +315,23 @@ impl Default for Collector {
 
 /// Histogram에서 (mean, p50, p95, p99, max) ms 추출
 fn read_hist(hist: &Mutex<Histogram<u64>>) -> (f64, f64, f64, f64, f64) {
-    match hist.lock() {
-        Ok(h) => {
-            if h.len() == 0 {
-                return (0.0, 0.0, 0.0, 0.0, 0.0);
-            }
-            (
-                h.mean() / 1000.0,
-                h.value_at_quantile(0.50) as f64 / 1000.0,
-                h.value_at_quantile(0.95) as f64 / 1000.0,
-                h.value_at_quantile(0.99) as f64 / 1000.0,
-                h.max() as f64 / 1000.0,
-            )
-        }
+    let h = match hist.lock() {
+        Ok(h) => h,
         Err(e) => {
-            warn!("histogram lock poisoned during snapshot (worker panicked?): {}", e);
-            (0.0, 0.0, 0.0, 0.0, 0.0)
+            warn!("histogram lock poisoned during snapshot — recovering");
+            e.into_inner()
         }
+    };
+    if h.len() == 0 {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
     }
+    (
+        h.mean() / 1000.0,
+        h.value_at_quantile(0.50) as f64 / 1000.0,
+        h.value_at_quantile(0.95) as f64 / 1000.0,
+        h.value_at_quantile(0.99) as f64 / 1000.0,
+        h.max() as f64 / 1000.0,
+    )
 }
 
 /// Histogram에서 누적 버킷 벡터 추출 (Prometheus le 스타일)
@@ -327,23 +342,25 @@ fn extract_buckets(hist: &Mutex<Histogram<u64>>) -> Vec<HistogramBucket> {
     let n = BOUNDS_US.len();
     let mut counts = vec![0u64; n + 1]; // [각 bound 버킷] + [+Inf 버킷]
 
-    match hist.lock() {
-        Ok(h) => {
-            if h.len() > 0 {
-                for v in h.iter_recorded() {
-                    let val = v.value_iterated_to();
-                    let cnt = v.count_at_value();
-                    // val이 속하는 버킷 인덱스: 처음으로 bound >= val 인 위치
-                    let idx = BOUNDS_US.partition_point(|&b| b < val);
-                    counts[idx.min(n)] += cnt;
-                }
-                // prefix-sum → 누적 카운트
-                for i in 1..=n {
-                    counts[i] += counts[i - 1];
-                }
-            }
+    let h = match hist.lock() {
+        Ok(h) => h,
+        Err(e) => {
+            warn!("histogram lock poisoned during bucket extraction — recovering");
+            e.into_inner()
         }
-        Err(e) => warn!("histogram lock poisoned during bucket extraction (worker panicked?): {}", e),
+    };
+    if h.len() > 0 {
+        for v in h.iter_recorded() {
+            let val = v.value_iterated_to();
+            let cnt = v.count_at_value();
+            // val이 속하는 버킷 인덱스: 처음으로 bound >= val 인 위치
+            let idx = BOUNDS_US.partition_point(|&b| b < val);
+            counts[idx.min(n)] += cnt;
+        }
+        // prefix-sum → 누적 카운트
+        for i in 1..=n {
+            counts[i] += counts[i - 1];
+        }
     }
 
     let mut result: Vec<HistogramBucket> = BOUNDS_MS
@@ -353,4 +370,128 @@ fn extract_buckets(hist: &Mutex<Histogram<u64>>) -> Vec<HistogramBucket> {
         .collect();
     result.push(HistogramBucket { le_ms: f64::INFINITY, count: counts[n] });
     result
+}
+
+// ---------------------------------------------------------------------------
+// 테스트
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_basic_counters() {
+        let c = Collector::new();
+        c.record_connection_attempt();
+        c.record_connection_attempt();
+        c.record_connection_established();
+        assert_eq!(c.connections_attempted.load(Ordering::Relaxed), 2);
+        assert_eq!(c.connections_established.load(Ordering::Relaxed), 1);
+        assert_eq!(c.active_connections.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_active_connection_guard_decrements_on_drop() {
+        let c = Collector::new();
+        c.record_connection_established();
+        c.record_connection_established();
+        assert_eq!(c.active_connections.load(Ordering::Relaxed), 2);
+        {
+            let _g1 = ActiveConnectionGuard::new(Arc::clone(&c), Arc::clone(&c));
+            let _g2 = ActiveConnectionGuard::new(Arc::clone(&c), Arc::clone(&c));
+            // _g1, _g2 각각 record_connection_established()를 호출하지 않으므로
+            // active_connections는 여기서도 2이다.
+            // Guard는 drop 시에만 감소시킨다.
+        }
+        // 두 가드가 drop되어 2회 감소 → 0
+        assert_eq!(c.active_connections.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_response_status_categorization() {
+        let c = Collector::new();
+        c.record_response(200, 1024, 500);
+        c.record_response(201, 512, 300);
+        c.record_response(404, 0, 100);
+        c.record_response(500, 0, 50);
+        c.record_response(0, 64, 200);   // TCP (status=0)
+        assert_eq!(c.status_2xx.load(Ordering::Relaxed), 2);
+        assert_eq!(c.status_4xx.load(Ordering::Relaxed), 1);
+        assert_eq!(c.status_5xx.load(Ordering::Relaxed), 1);
+        assert_eq!(c.status_other.load(Ordering::Relaxed), 1); // status=0
+        assert_eq!(c.responses_total.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_status_code_breakdown() {
+        let c = Collector::new();
+        c.record_response(200, 0, 0);
+        c.record_response(200, 0, 0);
+        c.record_response(404, 0, 0);
+        let map = c.status_code_breakdown.lock().unwrap();
+        assert_eq!(*map.get(&200).unwrap_or(&0), 2);
+        assert_eq!(*map.get(&404).unwrap_or(&0), 1);
+        assert!(!map.contains_key(&0)); // TCP(status=0)은 breakdown에 기록 안 됨
+    }
+
+    #[test]
+    fn test_histogram_latency_recording() {
+        let c = Collector::new();
+        // 1ms = 1000us
+        c.record_connect_latency(1_000);
+        c.record_ttfb(2_000);
+        c.record_response(200, 0, 5_000);
+
+        let snap = c.snapshot(0);
+        // 1회씩 기록했으므로 mean ≈ 기록값
+        assert!(snap.connect_mean_ms > 0.0);
+        assert!(snap.ttfb_mean_ms > 0.0);
+        assert!(snap.latency_mean_ms > 0.0);
+    }
+
+    #[test]
+    fn test_histogram_buckets_cumulative() {
+        let c = Collector::new();
+        // 0.5ms (500us) 경계 이하 기록
+        c.record_response(200, 0, 400); // 0.4ms — ≤0.5ms 버킷에 들어감
+        c.record_response(200, 0, 1_500); // 1.5ms — ≤2ms 버킷에 들어감
+
+        let snap = c.snapshot(0);
+        // 버킷은 누적이므로 ≤1ms 버킷 count >= ≤0.5ms 버킷 count
+        let buckets = &snap.latency_histogram;
+        assert!(!buckets.is_empty());
+        // 마지막 +Inf 버킷 = 총 기록 수
+        let inf_bucket = buckets.last().unwrap();
+        assert_eq!(inf_bucket.count, 2);
+        // 누적 단조 증가 확인
+        for w in buckets.windows(2) {
+            assert!(w[1].count >= w[0].count, "buckets must be cumulative");
+        }
+    }
+
+    #[test]
+    fn test_reset_clears_all() {
+        let c = Collector::new();
+        c.record_connection_attempt();
+        c.record_response(200, 1024, 500);
+        c.reset();
+        assert_eq!(c.connections_attempted.load(Ordering::Relaxed), 0);
+        assert_eq!(c.responses_total.load(Ordering::Relaxed), 0);
+        assert_eq!(c.bytes_rx.load(Ordering::Relaxed), 0);
+        let snap = c.snapshot(0);
+        assert_eq!(snap.latency_mean_ms, 0.0);
+    }
+
+    #[test]
+    fn test_bytes_accounting() {
+        let c = Collector::new();
+        c.record_request(512);
+        c.record_request(512);
+        c.record_response(200, 1024, 100);
+        assert_eq!(c.bytes_tx.load(Ordering::Relaxed), 1024);
+        assert_eq!(c.bytes_rx.load(Ordering::Relaxed), 1024);
+        assert_eq!(c.requests_total.load(Ordering::Relaxed), 2);
+    }
 }

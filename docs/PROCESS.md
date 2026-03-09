@@ -819,6 +819,60 @@ npm run build → ✓ built in 3.30s
 
 ---
 
+## Code Quality 개선 (#1~#7, #11) ✅
+
+**목표:** 코드 품질 조사 결과 발견된 잠재적 버그 및 안정성 문제 수정
+
+### 수정 내역
+
+#### #1 HTTP/1.1 상태코드 파싱 (`generator/src/http1.rs`)
+- `send_and_receive`: 첫 32바이트 슬라이스 파싱 → BufReader + `read_line()` 기반 줄 단위 파싱으로 전환
+- 응답 헤더를 완전한 줄 단위로 파싱 → 상태코드 누락 없음
+
+#### #2 Content-Length body 읽기 (`generator/src/http1.rs`)
+- `do_keepalive_request`: `read_exact()` → `read()` 루프로 교체
+- 서버가 Content-Length보다 일찍 연결 닫아도 에러 대신 수신량만 기록
+- `send_and_receive`: Content-Length 파싱 후 정확한 body 읽기 지원
+
+#### #3 CPS 단일 연결 deadline 체크 (`generator/src/http1.rs`, `http2.rs`, `tcp.rs`)
+- 기존: 요청 시작 전에만 deadline 체크 → 느린 요청이 duration 초과 가능
+- 수정: `wait_deadline(deadline) => break`를 `tokio::select!`에 추가 → 요청 중에도 즉시 중단
+
+#### #4 H2 백그라운드 태스크 추적 (`generator/src/http2.rs`)
+- `connect_h2()`: `JoinHandle<()>` 반환으로 변경 (`(SendRequest, JoinHandle)` 튜플)
+- `single_request_h2`: 요청 완료 후 `conn_handle.abort()` 호출
+- `h2_cc_worker`, `connection_worker`: conn_handle 보관 후 루프 종료 시 abort
+
+#### #5 Responder graceful stop (`responder/src/lib.rs`, `control/src/orchestrator.rs`)
+- `stop_all()`: `fn` → `async fn`으로 변경, 200ms grace period 추가
+- Generator 중지 후 호출하면 대부분의 처리 중인 요청이 완료됨
+- `orchestrator.rs`: 모든 `stop_all()` 호출에 `.await` 추가 (4곳)
+
+#### #6 TestConfig 검증 (`core/src/config.rs`, `control/src/orchestrator.rs`)
+- `TestConfig::validate()` 메서드 추가:
+  - clients/servers/associations 비어있는지 확인
+  - 모든 association의 client_id / server_id 존재 여부 확인
+  - 모든 client의 CIDR 파싱 유효성 확인
+  - 모든 server의 port 유효성 확인 (port=0 방지)
+- `orchestrator.start()`: 시험 시작 전 `validate()` 호출, 실패 시 TestState::Failed
+
+#### #7 localStorage 쿼터 에러 처리 (`frontend/src/components/TestControl.tsx`)
+- auto-save의 `localStorage.setItem()`에 try-catch 추가
+- QuotaExceededError 등 저장 실패 시 `console.warn`으로 기록 (조용한 실패)
+
+#### #11 Histogram lock poisoning 복구 (`metrics/src/collector.rs`)
+- `warn!` + skip 패턴 → `e.into_inner()` 복구 패턴으로 전환
+- 워커 패닉으로 lock이 poisoned되어도 이후 기록이 계속 작동
+- 영향 범위: `record_connect_latency`, `record_ttfb`, `record_response`, `read_hist`, `extract_buckets`
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 3.41s
+npm run build → ✓ built in 3.77s
+```
+
+---
+
 ## 참고 문서
 
 - `testbed/topology.md`: 네트워크 토폴로지 및 수동 설정 예시

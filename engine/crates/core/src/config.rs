@@ -249,6 +249,9 @@ impl ClientDef {
         let prefix = prefix_str
             .parse::<u8>()
             .map_err(|e| format!("Invalid CIDR '{}': bad prefix length: {}", self.cidr, e))?;
+        if prefix > 32 {
+            return Err(format!("Invalid CIDR '{}': prefix length {} exceeds 32", self.cidr, prefix));
+        }
         let ip = ip_str
             .parse::<std::net::Ipv4Addr>()
             .map_err(|e| format!("Invalid CIDR '{}': {}", self.cidr, e))?;
@@ -533,5 +536,250 @@ impl TestConfig {
 
     pub fn num_associations(&self) -> usize {
         self.associations.len()
+    }
+
+    /// 설정의 논리적 일관성을 검사한다.
+    ///
+    /// 시험 시작 전에 호출해 런타임 오류를 조기에 방지한다.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.clients.is_empty() {
+            return Err("clients 목록이 비어 있습니다.".to_string());
+        }
+        if self.servers.is_empty() {
+            return Err("servers 목록이 비어 있습니다.".to_string());
+        }
+        if self.associations.is_empty() {
+            return Err("associations 목록이 비어 있습니다.".to_string());
+        }
+
+        let client_ids: std::collections::HashSet<&str> =
+            self.clients.iter().map(|c| c.id.as_str()).collect();
+        let server_ids: std::collections::HashSet<&str> =
+            self.servers.iter().map(|s| s.id.as_str()).collect();
+
+        for assoc in &self.associations {
+            if !client_ids.contains(assoc.client_id.as_str()) {
+                return Err(format!(
+                    "Association '{}': client_id '{}'가 clients 목록에 없습니다. 가능한 ID: [{}]",
+                    assoc.id,
+                    assoc.client_id,
+                    client_ids.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            if !server_ids.contains(assoc.server_id.as_str()) {
+                return Err(format!(
+                    "Association '{}': server_id '{}'가 servers 목록에 없습니다. 가능한 ID: [{}]",
+                    assoc.id,
+                    assoc.server_id,
+                    server_ids.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+
+        for client in &self.clients {
+            client.parse_cidr().map_err(|e| format!("Client '{}': {}", client.id, e))?;
+        }
+
+        for server in &self.servers {
+            if server.port == 0 {
+                return Err(format!(
+                    "Server '{}': port 0은 유효하지 않습니다.",
+                    server.id
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 테스트
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 기본 설정 빌더: 유효한 TestConfig를 반환한다.
+    fn valid_config() -> TestConfig {
+        TestConfig::default_single_pair()
+    }
+
+    // ── validate() 단위 테스트 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_ok() {
+        assert!(valid_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_clients() {
+        let mut c = valid_config();
+        c.clients.clear();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("clients"), "expected 'clients' in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_empty_servers() {
+        let mut c = valid_config();
+        c.servers.clear();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("servers"), "expected 'servers' in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_empty_associations() {
+        let mut c = valid_config();
+        c.associations.clear();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("associations"), "expected 'associations' in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_missing_client_id() {
+        let mut c = valid_config();
+        c.associations[0].client_id = "nonexistent-client".to_string();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("client_id"), "expected 'client_id' in: {}", err);
+        assert!(err.contains("nonexistent-client"), "expected bad id in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_missing_server_id() {
+        let mut c = valid_config();
+        c.associations[0].server_id = "nonexistent-server".to_string();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("server_id"), "expected 'server_id' in: {}", err);
+        assert!(err.contains("nonexistent-server"), "expected bad id in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_bad_cidr() {
+        let mut c = valid_config();
+        c.clients[0].cidr = "not-a-cidr".to_string();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("CIDR") || err.contains("cidr") || err.contains("prefix"),
+            "expected CIDR error in: {}", err);
+    }
+
+    #[test]
+    fn test_validate_port_zero() {
+        let mut c = valid_config();
+        c.servers[0].port = 0;
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("port"), "expected 'port' in: {}", err);
+    }
+
+    // ── 직렬화 / 역직렬화 왕복 테스트 ──────────────────────────────────────
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let original = valid_config();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: TestConfig = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(original.id, restored.id);
+        assert_eq!(original.name, restored.name);
+        assert_eq!(original.test_type, restored.test_type);
+        assert_eq!(original.duration_secs, restored.duration_secs);
+        assert_eq!(original.clients.len(), restored.clients.len());
+        assert_eq!(original.servers.len(), restored.servers.len());
+        assert_eq!(original.associations.len(), restored.associations.len());
+    }
+
+    #[test]
+    fn test_payload_profile_serde_roundtrip() {
+        // TCP 페이로드
+        let tcp_payload = PayloadProfile::Tcp(TcpPayload { tx_bytes: 64, rx_bytes: 128 });
+        let json = serde_json::to_string(&tcp_payload).expect("serialize tcp");
+        let restored: PayloadProfile = serde_json::from_str(&json).expect("deserialize tcp");
+        match restored {
+            PayloadProfile::Tcp(p) => {
+                assert_eq!(p.tx_bytes, 64);
+                assert_eq!(p.rx_bytes, 128);
+            }
+            _ => panic!("expected Tcp payload"),
+        }
+
+        // HTTP 페이로드
+        let http_payload = PayloadProfile::Http(HttpPayload {
+            method: HttpMethod::Post,
+            path: "/api/test".to_string(),
+            request_body_bytes: Some(1024),
+            response_body_bytes: Some(2048),
+            path_extra_bytes: None,
+            h2_max_concurrent_streams: Some(10),
+        });
+        let json = serde_json::to_string(&http_payload).expect("serialize http");
+        let restored: PayloadProfile = serde_json::from_str(&json).expect("deserialize http");
+        match restored {
+            PayloadProfile::Http(p) => {
+                assert_eq!(p.method, HttpMethod::Post);
+                assert_eq!(p.path, "/api/test");
+                assert_eq!(p.request_body_bytes, Some(1024));
+                assert_eq!(p.h2_max_concurrent_streams, Some(10));
+            }
+            _ => panic!("expected Http payload"),
+        }
+    }
+
+    #[test]
+    fn test_load_config_serde_defaults() {
+        // 필드가 없을 때 기본값이 올바르게 적용되는지 확인
+        let json = r#"{"ramp_up_secs": 5}"#;
+        let load: LoadConfig = serde_json::from_str(json).expect("deserialize partial load");
+        assert_eq!(load.ramp_up_secs, 5);
+        assert_eq!(load.ramp_down_secs, 0);
+        assert!(load.num_connections.is_none());
+        assert!(load.connect_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn test_client_def_parse_cidr() {
+        let client = ClientDef {
+            id: "c0".to_string(),
+            name: "c0".to_string(),
+            cidr: "10.10.1.1/24".to_string(),
+            count: Some(5),
+        };
+        let (ip, prefix) = client.parse_cidr().expect("valid cidr");
+        assert_eq!(ip.to_string(), "10.10.1.1");
+        assert_eq!(prefix, 24);
+        assert_eq!(client.effective_count(), 5);
+    }
+
+    #[test]
+    fn test_client_def_parse_cidr_invalid() {
+        let bad_cases = [
+            "10.10.1.1",         // prefix 없음
+            "10.10.1.999/24",    // 잘못된 IP
+            "10.10.1.1/33",      // prefix 범위 초과 (parse::<u8>는 성공하지만 IP 할당 시 오류)
+            "abc/24",            // 숫자가 아닌 IP
+        ];
+        for cidr in bad_cases {
+            let client = ClientDef {
+                id: "c0".to_string(),
+                name: "c0".to_string(),
+                cidr: cidr.to_string(),
+                count: None,
+            };
+            assert!(client.parse_cidr().is_err(), "expected error for cidr: {}", cidr);
+        }
+    }
+
+    #[test]
+    fn test_load_config_connections_per_worker() {
+        let load = LoadConfig {
+            num_connections: Some(100),
+            ..LoadConfig::default()
+        };
+        // 4 워커: ceil(100/4) = 25
+        assert_eq!(load.connections_per_worker(4), 25);
+        // 7 워커: ceil(100/7) = 15
+        assert_eq!(load.connections_per_worker(7), 15);
+        // 워커 수 > total: 최소 1
+        assert_eq!(load.connections_per_worker(200), 1);
     }
 }

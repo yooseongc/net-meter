@@ -67,8 +67,8 @@ async fn run_cps(
     let sni = tls_server_name.to_string();
 
     if num_conn <= 1 {
+        // 단일 순차 루프 — shutdown과 deadline 모두 select에 포함해 즉시 중단
         loop {
-            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
             let cycle = single_request_h2(
                 &addr, &host, method.clone(), &path, req_body,
                 Arc::clone(&global), Arc::clone(&proto),
@@ -77,6 +77,7 @@ async fn run_cps(
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break,
+                _ = wait_deadline(deadline) => break,
                 _ = cycle => {}
             }
         }
@@ -225,13 +226,13 @@ async fn single_request_h2(
     record_attempt(&global, &proto);
 
     let connect_start = Instant::now();
-    let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
-        Ok(Ok(sr)) => {
+    let (send_req, conn_handle) = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
+        Ok(Ok(pair)) => {
             let us = connect_start.elapsed().as_micros() as u64;
             record_established(&global, &proto);
             global.record_connect_latency(us);
             proto.record_connect_latency(us);
-            sr
+            pair
         }
         Ok(Err(e)) => {
             debug!(addr, error = %e, "h2 handshake failed");
@@ -252,6 +253,8 @@ async fn single_request_h2(
         send_h2_stream(&send_req, host, method, path, req_body_bytes, &global, &proto),
     )
     .await;
+    // 요청 완료 후 연결 드라이버 종료
+    conn_handle.abort();
 
     match result {
         Ok(Ok((status, bytes_rx))) => {
@@ -288,13 +291,13 @@ async fn h2_cc_worker(
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
-            Ok(Ok(sr)) => {
+        let (send_req, conn_handle) = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
+            Ok(Ok(pair)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
                 global.record_connect_latency(us);
                 proto.record_connect_latency(us);
-                sr
+                pair
             }
             Ok(Err(e)) => {
                 debug!(error = %e, "h2 CC connect failed, retrying");
@@ -335,6 +338,7 @@ async fn h2_cc_worker(
             // CC: 1초 간격 — 연결 유지가 목적
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        conn_handle.abort();
         // _guard drop here
     }
 }
@@ -364,13 +368,13 @@ async fn connection_worker(
 
         record_attempt(&global, &proto);
         let connect_start = Instant::now();
-        let send_req = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
-            Ok(Ok(sr)) => {
+        let (send_req, conn_handle) = match timeout(connect_timeout, connect_h2(addr, &tls, src_ip, tls_server_name)).await {
+            Ok(Ok(pair)) => {
                 let us = connect_start.elapsed().as_micros() as u64;
                 record_established(&global, &proto);
                 global.record_connect_latency(us);
                 proto.record_connect_latency(us);
-                sr
+                pair
             }
             Ok(Err(e)) => {
                 debug!(error = %e, "h2 connect failed, retrying");
@@ -417,6 +421,8 @@ async fn connection_worker(
         }
 
         for h in stream_handles { let _ = h.await; }
+        // 스트림 처리 완료 후 연결 드라이버 종료
+        conn_handle.abort();
         // _guard drop here
     }
 }
@@ -425,13 +431,17 @@ async fn connection_worker(
 // 헬퍼
 // ---------------------------------------------------------------------------
 
-/// h2c 또는 TLS h2 연결을 수립하고 SendRequest를 반환한다.
+/// h2c 또는 TLS h2 연결을 수립하고 (SendRequest, 드라이버 JoinHandle)을 반환한다.
+///
+/// 드라이버 JoinHandle은 호출부에서 반드시 보관해야 한다.
+/// SendRequest가 drop될 때 h2 연결이 닫히고 드라이버 태스크도 자연 종료된다.
+/// 필요 시 abort()로 즉시 종료할 수 있다.
 async fn connect_h2(
     addr: &str,
     tls: &Option<Arc<ClientConfig>>,
     src_ip: Option<IpAddr>,
     tls_server_name: &str,
-) -> anyhow::Result<h2::client::SendRequest<Bytes>> {
+) -> anyhow::Result<(h2::client::SendRequest<Bytes>, tokio::task::JoinHandle<()>)> {
     let tcp = connect_tcp(addr, src_ip).await?;
 
     if let Some(cfg) = tls {
@@ -442,23 +452,23 @@ async fn connect_h2(
             .initial_window_size(1 << 20)
             .handshake::<_, Bytes>(tls_stream)
             .await?;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = conn.await {
-                debug!("h2 TLS connection closed: {}", e);
+                debug!("h2 TLS connection driver finished: {}", e);
             }
         });
-        Ok(send_req)
+        Ok((send_req, handle))
     } else {
         let (send_req, conn) = h2::client::Builder::new()
             .initial_window_size(1 << 20)
             .handshake::<_, Bytes>(tcp)
             .await?;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = conn.await {
-                debug!("h2c connection closed: {}", e);
+                debug!("h2c connection driver finished: {}", e);
             }
         });
-        Ok(send_req)
+        Ok((send_req, handle))
     }
 }
 

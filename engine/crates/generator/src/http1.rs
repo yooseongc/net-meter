@@ -69,11 +69,8 @@ async fn run_cps(
     let sni = tls_server_name.to_string();
 
     if num_conn <= 1 {
-        // 단일 순차 루프
+        // 단일 순차 루프 — shutdown과 deadline 모두 select에 포함해 즉시 중단
         loop {
-            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
-                break;
-            }
             let cycle = single_request(
                 &addr, &method, &path, req_body,
                 Arc::clone(&global), Arc::clone(&proto),
@@ -82,6 +79,7 @@ async fn run_cps(
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break,
+                _ = wait_deadline(deadline) => break,
                 _ = cycle => {}
             }
         }
@@ -293,7 +291,7 @@ async fn single_request(
 }
 
 async fn send_and_receive<S>(
-    mut stream: S,
+    stream: S,
     host: &str,
     method: &str,
     path: &str,
@@ -302,8 +300,12 @@ async fn send_and_receive<S>(
     proto: &Arc<Collector>,
 ) -> std::io::Result<(u16, u64)>
 where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send,
 {
+    // BufReader로 감싸 헤더를 줄 단위로 파싱한다.
+    // BufReader<S: AsyncWrite>는 AsyncWrite를 내부 타입에 위임하므로 송수신 모두 가능.
+    let mut stream = BufReader::new(stream);
+
     let header = if req_body_bytes > 0 {
         format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: net-meter/0.1\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
@@ -327,31 +329,65 @@ where
     proto.record_request(tx);
 
     let ttfb_start = Instant::now();
-    let mut buf = vec![0u8; 8192];
-    let mut total_rx: u64 = 0;
     let mut status_code: u16 = 0;
-    let mut first_byte = true;
+    let mut content_length: Option<usize> = None;
+    let mut first_line = true;
+    let mut total_rx: u64 = 0;
 
+    // 응답 헤더를 줄 단위로 파싱 — 첫 32바이트 제한 없이 전체 상태 줄을 처리
     loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 { break; }
+        let mut line = String::new();
+        let n = stream.read_line(&mut line).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed during response headers"));
+        }
+        total_rx += n as u64;
 
-        if first_byte {
+        if first_line {
             let ttfb_us = ttfb_start.elapsed().as_micros() as u64;
             global.record_ttfb(ttfb_us);
             proto.record_ttfb(ttfb_us);
-            if let Ok(s) = std::str::from_utf8(&buf[..n.min(32)]) {
-                if s.starts_with("HTTP/") {
-                    status_code = s
-                        .split_whitespace()
-                        .nth(1)
-                        .and_then(|c| c.parse().ok())
-                        .unwrap_or(0);
+            status_code = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            first_line = false;
+        }
+
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break; // 헤더 끝 (빈 줄)
+        }
+
+        if let Some((name, value)) = trimmed.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().ok();
+            }
+        }
+    }
+
+    // body 읽기: Content-Length 있으면 해당 크기만큼, 없으면 EOF까지 (Connection: close)
+    let mut buf = [0u8; 8192];
+    if let Some(len) = content_length {
+        let mut remaining = len;
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len());
+            match stream.read(&mut buf[..to_read]).await? {
+                0 => break, // 서버가 일찍 닫음 — 수신한 만큼만 기록
+                n => {
+                    remaining -= n;
+                    total_rx += n as u64;
                 }
             }
-            first_byte = false;
         }
-        total_rx += n as u64;
+    } else {
+        // Content-Length 없음: EOF까지 읽기
+        loop {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 { break; }
+            total_rx += n as u64;
+        }
     }
 
     Ok((status_code, total_rx))
@@ -637,15 +673,21 @@ async fn do_keepalive_request(
 
     let reuse = if let Some(len) = content_length {
         if len > 0 {
-            // 고정 크기 버퍼 루프로 읽기 — 단일 Vec 할당 방지
+            // read_exact 대신 read() 루프 — 서버가 일찍 닫아도 에러 대신 수신량만 기록
             let mut remaining = len;
             let mut buf = [0u8; 8192];
+            let mut actually_read: usize = 0;
             while remaining > 0 {
                 let to_read = remaining.min(buf.len());
-                reader.read_exact(&mut buf[..to_read]).await?;
-                remaining -= to_read;
+                match reader.read(&mut buf[..to_read]).await? {
+                    0 => break, // 서버가 Content-Length보다 일찍 닫음
+                    n => {
+                        remaining -= n;
+                        actually_read += n;
+                    }
+                }
             }
-            total_rx += len as u64;
+            total_rx += actually_read as u64;
         }
         server_keep_alive
     } else {

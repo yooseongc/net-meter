@@ -441,7 +441,12 @@ export default function TestControl() {
   useEffect(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
     autoSaveTimer.current = setTimeout(() => {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(config))
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(config))
+      } catch (e) {
+        // QuotaExceededError 등 localStorage 쓰기 실패 — 조용히 넘어감
+        console.warn('[net-meter] Auto-save failed (localStorage quota exceeded?):', e)
+      }
     }, 500)
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)

@@ -56,8 +56,8 @@ async fn run_cps(
     let addr = addr.to_string();
 
     if num_conn <= 1 {
+        // 단일 순차 루프 — shutdown과 deadline 모두 select에 포함해 즉시 중단
         loop {
-            if deadline.map(|d| Instant::now() >= d).unwrap_or(false) { break; }
             let cycle = tcp_pingpong(
                 &addr, tx_bytes, rx_bytes,
                 Arc::clone(&global), Arc::clone(&proto),
@@ -66,6 +66,7 @@ async fn run_cps(
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break,
+                _ = wait_deadline(deadline) => break,
                 _ = cycle => {}
             }
         }

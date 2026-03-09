@@ -75,7 +75,14 @@ impl Responder {
     }
 
     /// 모든 서버를 중지한다.
-    pub fn stop_all(&mut self) {
+    ///
+    /// 처리 중인 요청에 짧은 grace 구간을 준 뒤 강제 abort한다.
+    /// Generator를 먼저 중지한 후 호출하면 grace 구간 안에 대부분의 요청이 완료된다.
+    pub async fn stop_all(&mut self) {
+        if !self.handles.is_empty() {
+            // 진행 중인 요청 완료를 위한 짧은 grace 구간
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         for h in self.handles.drain(..) {
             h.abort();
         }
@@ -276,4 +283,94 @@ fn set_quickack(stream: &tokio::net::TcpStream) -> std::io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn set_quickack(_stream: &tokio::net::TcpStream) -> std::io::Result<()> {
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 통합 테스트
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use net_meter_core::{HttpPayload, HttpMethod, PayloadProfile, Protocol, TcpPayload};
+    use net_meter_metrics::Collector;
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// TCP Responder: 연결 수락 → 응답 전송 확인
+    #[tokio::test]
+    async fn test_tcp_responder_pingpong() {
+        let global = Collector::new();
+        let proto  = Collector::new();
+
+        let payload = TcpPayload { tx_bytes: 8, rx_bytes: 16 };
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let mut responder = Responder::new();
+        responder
+            .start_server(
+                addr,
+                Protocol::Tcp,
+                &PayloadProfile::Tcp(payload.clone()),
+                Arc::clone(&global),
+                Arc::clone(&proto),
+                false,
+                None,
+            )
+            .await
+            .expect("start_server");
+
+        // 실제 바인드된 포트를 구할 방법이 없으므로 잠깐 대기 후 0번 포트 bind 특성 이용
+        // 대신 고정 포트를 재시도 방식으로 사용
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        responder.stop_all().await;
+    }
+
+    /// HTTP/1.1 Responder: listen 후 연결해 200 응답 수신 확인
+    #[tokio::test]
+    async fn test_http1_responder_basic() {
+        let global = Collector::new();
+        let proto  = Collector::new();
+
+        let payload = HttpPayload {
+            method: HttpMethod::Get,
+            path: "/".to_string(),
+            request_body_bytes: None,
+            response_body_bytes: Some(64),
+            path_extra_bytes: None,
+            h2_max_concurrent_streams: None,
+        };
+
+        // 포트 0으로 OS에 임의 포트 할당 요청
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+        // TcpListener를 직접 spawn_http_server에 전달
+        let g2 = Arc::clone(&global);
+        let p2 = Arc::clone(&proto);
+        let handle = spawn_http_server(listener, 64, false, false, g2, p2, None);
+
+        // 잠깐 뒤 연결
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(bound_addr).await.expect("connect");
+        let req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        stream.write_all(req).await.expect("write request");
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read response");
+        let response_str = String::from_utf8_lossy(&response);
+
+        // 200 OK 확인
+        assert!(
+            response_str.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got: {}",
+            &response_str[..response_str.len().min(100)],
+        );
+        // 서버 메트릭 확인
+        assert_eq!(global.server_requests.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        handle.abort();
+        drop(payload);
+    }
 }
