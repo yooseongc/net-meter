@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use hdrhistogram::Histogram;
 use net_meter_core::{HistogramBucket, MetricsSnapshot};
+use tracing::warn;
 
 /// 히스토그램 버킷 상한 (µs)
 const BOUNDS_US: &[u64] = &[500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000];
@@ -117,16 +118,18 @@ impl Collector {
     /// TCP connect latency 기록 (microseconds)
     #[inline]
     pub fn record_connect_latency(&self, us: u64) {
-        if let Ok(mut h) = self.connect_hist.lock() {
-            let _ = h.record(us.max(1));
+        match self.connect_hist.lock() {
+            Ok(mut h) => { let _ = h.record(us.max(1)); }
+            Err(e) => warn!("connect_hist lock poisoned (worker panicked?): {}", e),
         }
     }
 
     /// TTFB 기록 (microseconds): 요청 전송 완료 → 첫 응답 바이트
     #[inline]
     pub fn record_ttfb(&self, us: u64) {
-        if let Ok(mut h) = self.ttfb_hist.lock() {
-            let _ = h.record(us.max(1));
+        match self.ttfb_hist.lock() {
+            Ok(mut h) => { let _ = h.record(us.max(1)); }
+            Err(e) => warn!("ttfb_hist lock poisoned (worker panicked?): {}", e),
         }
     }
 
@@ -163,13 +166,15 @@ impl Collector {
         };
 
         if status > 0 {
-            if let Ok(mut map) = self.status_code_breakdown.lock() {
-                *map.entry(status).or_insert(0) += 1;
+            match self.status_code_breakdown.lock() {
+                Ok(mut map) => { *map.entry(status).or_insert(0) += 1; }
+                Err(e) => warn!("status_code_breakdown lock poisoned (worker panicked?): {}", e),
             }
         }
 
-        if let Ok(mut h) = self.latency_hist.lock() {
-            let _ = h.record(latency_us.max(1));
+        match self.latency_hist.lock() {
+            Ok(mut h) => { let _ = h.record(latency_us.max(1)); }
+            Err(e) => warn!("latency_hist lock poisoned (worker panicked?): {}", e),
         }
     }
 
@@ -294,19 +299,23 @@ impl Default for Collector {
 
 /// Histogram에서 (mean, p50, p95, p99, max) ms 추출
 fn read_hist(hist: &Mutex<Histogram<u64>>) -> (f64, f64, f64, f64, f64) {
-    if let Ok(h) = hist.lock() {
-        if h.len() == 0 {
-            return (0.0, 0.0, 0.0, 0.0, 0.0);
+    match hist.lock() {
+        Ok(h) => {
+            if h.len() == 0 {
+                return (0.0, 0.0, 0.0, 0.0, 0.0);
+            }
+            (
+                h.mean() / 1000.0,
+                h.value_at_quantile(0.50) as f64 / 1000.0,
+                h.value_at_quantile(0.95) as f64 / 1000.0,
+                h.value_at_quantile(0.99) as f64 / 1000.0,
+                h.max() as f64 / 1000.0,
+            )
         }
-        (
-            h.mean() / 1000.0,
-            h.value_at_quantile(0.50) as f64 / 1000.0,
-            h.value_at_quantile(0.95) as f64 / 1000.0,
-            h.value_at_quantile(0.99) as f64 / 1000.0,
-            h.max() as f64 / 1000.0,
-        )
-    } else {
-        (0.0, 0.0, 0.0, 0.0, 0.0)
+        Err(e) => {
+            warn!("histogram lock poisoned during snapshot (worker panicked?): {}", e);
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        }
     }
 }
 
@@ -318,20 +327,23 @@ fn extract_buckets(hist: &Mutex<Histogram<u64>>) -> Vec<HistogramBucket> {
     let n = BOUNDS_US.len();
     let mut counts = vec![0u64; n + 1]; // [각 bound 버킷] + [+Inf 버킷]
 
-    if let Ok(h) = hist.lock() {
-        if h.len() > 0 {
-            for v in h.iter_recorded() {
-                let val = v.value_iterated_to();
-                let cnt = v.count_at_value();
-                // val이 속하는 버킷 인덱스: 처음으로 bound >= val 인 위치
-                let idx = BOUNDS_US.partition_point(|&b| b < val);
-                counts[idx.min(n)] += cnt;
-            }
-            // prefix-sum → 누적 카운트
-            for i in 1..=n {
-                counts[i] += counts[i - 1];
+    match hist.lock() {
+        Ok(h) => {
+            if h.len() > 0 {
+                for v in h.iter_recorded() {
+                    let val = v.value_iterated_to();
+                    let cnt = v.count_at_value();
+                    // val이 속하는 버킷 인덱스: 처음으로 bound >= val 인 위치
+                    let idx = BOUNDS_US.partition_point(|&b| b < val);
+                    counts[idx.min(n)] += cnt;
+                }
+                // prefix-sum → 누적 카운트
+                for i in 1..=n {
+                    counts[i] += counts[i - 1];
+                }
             }
         }
+        Err(e) => warn!("histogram lock poisoned during bucket extraction (worker panicked?): {}", e),
     }
 
     let mut result: Vec<HistogramBucket> = BOUNDS_MS

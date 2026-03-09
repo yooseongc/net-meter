@@ -91,8 +91,8 @@ impl AppState {
     pub fn new(server_net: ServerNetConfig) -> Arc<Self> {
         let global_metrics = Collector::new();
         let aggregator = MultiAggregator::new(Arc::clone(&global_metrics));
-        let (snapshot_tx, _) = broadcast::channel(64);
-        let (event_tx, _) = broadcast::channel(256);
+        let (snapshot_tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(512);
 
         Arc::new(Self {
             server_net,

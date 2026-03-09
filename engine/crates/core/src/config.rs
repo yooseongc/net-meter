@@ -243,9 +243,12 @@ pub struct ClientDef {
 impl ClientDef {
     /// cidr에서 (base_ip, prefix_len) 파싱.
     pub fn parse_cidr(&self) -> Result<(std::net::Ipv4Addr, u8), String> {
-        let mut parts = self.cidr.splitn(2, '/');
-        let ip_str = parts.next().unwrap_or("");
-        let prefix = parts.next().and_then(|p| p.parse().ok()).unwrap_or(24u8);
+        let (ip_str, prefix_str) = self.cidr.split_once('/').ok_or_else(|| {
+            format!("Invalid CIDR '{}': missing prefix length (e.g. '10.10.1.1/24')", self.cidr)
+        })?;
+        let prefix = prefix_str
+            .parse::<u8>()
+            .map_err(|e| format!("Invalid CIDR '{}': bad prefix length: {}", self.cidr, e))?;
         let ip = ip_str
             .parse::<std::net::Ipv4Addr>()
             .map_err(|e| format!("Invalid CIDR '{}': {}", self.cidr, e))?;
@@ -505,14 +508,14 @@ impl TestConfig {
             .collect()
     }
 
-    /// server_id → ServerDef 맵
-    pub fn server_map(&self) -> HashMap<String, ServerDef> {
-        self.servers.iter().map(|s| (s.id.clone(), s.clone())).collect()
+    /// server_id → &ServerDef 맵 (불필요한 clone 없이 참조 반환)
+    pub fn server_map(&self) -> HashMap<&str, &ServerDef> {
+        self.servers.iter().map(|s| (s.id.as_str(), s)).collect()
     }
 
-    /// client_id → ClientDef 맵
-    pub fn client_map(&self) -> HashMap<String, ClientDef> {
-        self.clients.iter().map(|c| (c.id.clone(), c.clone())).collect()
+    /// client_id → &ClientDef 맵 (불필요한 clone 없이 참조 반환)
+    pub fn client_map(&self) -> HashMap<&str, &ClientDef> {
+        self.clients.iter().map(|c| (c.id.as_str(), c)).collect()
     }
 
     /// assoc_id → "host:port" 맵 (로컬 모드용)
@@ -521,7 +524,7 @@ impl TestConfig {
         self.associations
             .iter()
             .filter_map(|a| {
-                let server = server_map.get(&a.server_id)?;
+                let server = server_map.get(a.server_id.as_str())?;
                 let host = server.ip.as_deref().unwrap_or("127.0.0.1");
                 Some((a.id.clone(), format!("{}:{}", host, server.port)))
             })

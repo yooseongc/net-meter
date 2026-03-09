@@ -69,15 +69,15 @@ impl Generator {
         let client_map = config.client_map();
 
         for assoc in &config.associations {
-            let server_def = match server_map.get(&assoc.server_id) {
-                Some(s) => s.clone(),
+            let server_def = match server_map.get(assoc.server_id.as_str()) {
+                Some(s) => (*s).clone(),
                 None => {
                     error!(assoc_id = %assoc.id, server_id = %assoc.server_id, "No ServerDef found, skipping");
                     continue;
                 }
             };
 
-            if client_map.get(&assoc.client_id).is_none() {
+            if client_map.get(assoc.client_id.as_str()).is_none() {
                 error!(assoc_id = %assoc.id, client_id = %assoc.client_id, "No ClientDef found, skipping");
                 continue;
             };

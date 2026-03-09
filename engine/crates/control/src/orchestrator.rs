@@ -262,8 +262,8 @@ impl Orchestrator {
         let server_map = config.server_map();
 
         for (server_id, bind_addr_str) in &server_binds {
-            let server = match server_map.get(server_id) {
-                Some(s) => s,
+            let server = match server_map.get(server_id.as_str()) {
+                Some(s) => *s,
                 None => continue,
             };
 
@@ -374,8 +374,8 @@ impl Orchestrator {
 
         // Responder: 각 server IP에 바인딩 (로컬 모드, NS 없음)
         for (server_id, bind_addr_str) in &server_binds {
-            let server = match server_map.get(server_id) {
-                Some(s) => s,
+            let server = match server_map.get(server_id.as_str()) {
+                Some(s) => *s,
                 None => continue,
             };
             let bind_addr: SocketAddr = bind_addr_str
