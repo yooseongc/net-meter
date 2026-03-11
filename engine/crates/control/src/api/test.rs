@@ -46,13 +46,18 @@ async fn start_handler(
     State(state): State<Arc<AppState>>,
     Json(config): Json<TestConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let current = *state.test_state.read().await;
-    if current != TestState::Idle && current != TestState::Completed && current != TestState::Failed
     {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "Test already running" })),
-        ));
+        let mut current = state.test_state.write().await;
+        if *current != TestState::Idle
+            && *current != TestState::Completed
+            && *current != TestState::Failed
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "Test already running" })),
+            ));
+        }
+        *current = TestState::Preparing;
     }
 
     info!(config_name = %config.name, associations = config.associations.len(), "Received start request");

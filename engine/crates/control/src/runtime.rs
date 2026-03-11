@@ -110,7 +110,7 @@ impl RuntimeSettings {
             settings.apply_file(file);
         }
 
-        settings.apply_cli(cli);
+        settings.apply_cli(cli)?;
         Ok(settings)
     }
 
@@ -144,7 +144,7 @@ impl RuntimeSettings {
         }
     }
 
-    fn apply_cli(&mut self, cli: &Cli) {
+    fn apply_cli(&mut self, cli: &Cli) -> Result<()> {
         if let Some(host) = &cli.host {
             self.host = host.clone();
         }
@@ -158,7 +158,7 @@ impl RuntimeSettings {
             self.web_dir = Some(web_dir.clone());
         }
         if let Some(mode) = &cli.mode {
-            self.server_net.mode = parse_network_mode(mode);
+            self.server_net.mode = parse_network_mode(mode)?;
         }
         if let Some(upper_iface) = &cli.upper_iface {
             self.server_net.upper_iface = upper_iface.clone();
@@ -172,14 +172,19 @@ impl RuntimeSettings {
         if let Some(ns_prefix) = &cli.ns_prefix {
             self.server_net.ns_prefix = ns_prefix.clone();
         }
+        Ok(())
     }
 }
 
-fn parse_network_mode(value: &str) -> NetworkMode {
+fn parse_network_mode(value: &str) -> Result<NetworkMode> {
     match value {
-        "namespace" => NetworkMode::Namespace,
-        "external_port" => NetworkMode::ExternalPort,
-        _ => NetworkMode::Loopback,
+        "loopback" => Ok(NetworkMode::Loopback),
+        "namespace" => Ok(NetworkMode::Namespace),
+        "external_port" => Ok(NetworkMode::ExternalPort),
+        other => anyhow::bail!(
+            "invalid network mode '{}'; expected one of: loopback, namespace, external_port",
+            other
+        ),
     }
 }
 

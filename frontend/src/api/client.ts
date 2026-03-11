@@ -48,7 +48,7 @@ export function isTestConfig(value: unknown): value is TestConfig {
     Array.isArray(value.clients) &&
     Array.isArray(value.servers) &&
     Array.isArray(value.associations) &&
-    isRecord(value.tcp_options) &&
+    (!('tcp_options' in value) || value.tcp_options === undefined || isRecord(value.tcp_options)) &&
     (!('thresholds' in value) || value.thresholds === undefined || isRecord(value.thresholds))
   )
 }
@@ -104,7 +104,8 @@ export function connectMetricsWs(
   onSnapshot: (snap: MetricsSnapshot) => void,
   onClose?: () => void,
 ): WebSocket {
-  const wsUrl = `ws://${window.location.host}/api/metrics/ws`
+  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const wsUrl = `${wsScheme}://${window.location.host}/api/metrics/ws`
   const ws = new WebSocket(wsUrl)
   ws.onmessage = (ev) => {
     try {

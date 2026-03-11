@@ -162,9 +162,18 @@ async fn monitor(
     watch_until_done: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    let mut seen_active_state = false;
+
     loop {
         let status: TestStatus = get_json(client, base_url, "/api/status").await?;
         let metrics: MetricsSnapshot = get_json(client, base_url, "/api/metrics").await?;
+
+        if matches!(
+            status.state,
+            TestState::Preparing | TestState::RampingUp | TestState::Running | TestState::RampingDown | TestState::Stopping
+        ) {
+            seen_active_state = true;
+        }
 
         if json {
             let payload = serde_json::json!({
@@ -177,7 +186,8 @@ async fn monitor(
             print_status_summary(&status, &metrics);
         }
 
-        let terminal = matches!(status.state, TestState::Completed | TestState::Failed | TestState::Idle);
+        let terminal = matches!(status.state, TestState::Completed | TestState::Failed)
+            || (seen_active_state && status.state == TestState::Idle);
         if watch_until_done && terminal {
             break;
         }
