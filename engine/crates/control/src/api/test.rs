@@ -62,11 +62,8 @@ async fn start_handler(
 
     info!(config_name = %config.name, associations = config.associations.len(), "Received start request");
 
-    let state_clone = Arc::clone(&state);
-    tokio::spawn(async move {
-        let mut orch = state_clone.orchestrator.lock().await;
-        orch.start(config, Arc::clone(&state_clone)).await;
-    });
+    let mut orch = state.orchestrator.lock().await;
+    orch.start(config, Arc::clone(&state)).await;
 
     Ok(Json(serde_json::json!({ "status": "starting" })))
 }
@@ -84,11 +81,8 @@ async fn stop_handler(
 
     info!("Received stop request");
 
-    let state_clone = Arc::clone(&state);
-    tokio::spawn(async move {
-        let mut orch = state_clone.orchestrator.lock().await;
-        orch.stop(Arc::clone(&state_clone)).await;
-    });
+    let mut orch = state.orchestrator.lock().await;
+    orch.stop(Arc::clone(&state)).await;
 
     Ok(Json(serde_json::json!({ "status": "stopping" })))
 }

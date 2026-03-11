@@ -75,7 +75,7 @@ struct HealthResponse {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let client = Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
         .build()?;
 
     match cli.command {
@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run { file, interval } => {
             let config = load_test_config(&file)?;
             post_json::<_, serde_json::Value>(&client, &cli.url, "/api/test/start", &config).await?;
+            wait_for_start(&client, &cli.url).await?;
             monitor(&client, &cli.url, interval, true, cli.json).await?;
         }
     }
@@ -162,18 +163,9 @@ async fn monitor(
     watch_until_done: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let mut seen_active_state = false;
-
     loop {
         let status: TestStatus = get_json(client, base_url, "/api/status").await?;
         let metrics: MetricsSnapshot = get_json(client, base_url, "/api/metrics").await?;
-
-        if matches!(
-            status.state,
-            TestState::Preparing | TestState::RampingUp | TestState::Running | TestState::RampingDown | TestState::Stopping
-        ) {
-            seen_active_state = true;
-        }
 
         if json {
             let payload = serde_json::json!({
@@ -186,8 +178,7 @@ async fn monitor(
             print_status_summary(&status, &metrics);
         }
 
-        let terminal = matches!(status.state, TestState::Completed | TestState::Failed)
-            || (seen_active_state && status.state == TestState::Idle);
+        let terminal = matches!(status.state, TestState::Completed | TestState::Failed | TestState::Idle);
         if watch_until_done && terminal {
             break;
         }
@@ -196,6 +187,17 @@ async fn monitor(
     }
 
     Ok(())
+}
+
+async fn wait_for_start(client: &Client, base_url: &str) -> anyhow::Result<()> {
+    for _ in 0..120 {
+        let status: TestStatus = get_json(client, base_url, "/api/status").await?;
+        if status.state != TestState::Idle {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("test did not leave idle state within 120 seconds");
 }
 
 fn print_status(status: &TestStatus) {

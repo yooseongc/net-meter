@@ -79,8 +79,13 @@ export const api = {
     fetchJson<{ status: string }>('/test/stop', { method: 'POST' }),
   getMetrics: () => fetchJson<MetricsSnapshot>('/metrics'),
   listResults: () => fetchJson<TestResult[]>('/results'),
-  deleteResult: (id: string) =>
-    fetch(`${BASE}/results/${id}`, { method: 'DELETE' }),
+  deleteResult: async (id: string) => {
+    const res = await fetch(`${BASE}/results/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`${res.status} ${res.statusText}: ${text}`)
+    }
+  },
 }
 
 export function connectEventStream(
