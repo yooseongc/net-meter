@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NetworkMode",
+  "description": "네트워크 모드",
+  "oneOf": [
+    {
+      "description": "루프백 / 로컬 호스트 (개발/기능 검증용)",
+      "type": "string",
+      "const": "loopback"
+    },
+    {
+      "description": "Linux network namespace + veth pair (CAP_NET_ADMIN 필요)",
+      "type": "string",
+      "const": "namespace"
+    },
+    {
+      "description": "물리 NIC 2개를 직접 사용, 외부 DUT 연동 (Phase 11)",
+      "type": "string",
+      "const": "external_port"
+    }
+  ]
+}

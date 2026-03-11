@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServerDef",
+  "description": "서버 엔드포인트 정의.\n\n프로토콜과 TLS 설정을 포함한다.\n여러 Association이 동일한 ServerDef를 참조할 수 있다.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "고유 ID",
+      "type": "string"
+    },
+    "ip": {
+      "description": "서버 IP. NS 모드: None이면 자동 할당 (10.20.1.{N}).\n로컬 모드: None이면 127.0.0.1.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "name": {
+      "description": "사람이 읽기 좋은 이름",
+      "type": "string"
+    },
+    "port": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "protocol": {
+      "description": "사용 프로토콜",
+      "$ref": "#/$defs/Protocol"
+    },
+    "tls": {
+      "description": "TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)",
+      "type": "boolean",
+      "default": false
+    },
+    "tls_server_name": {
+      "description": "TLS SNI 서버 이름. IP 주소를 입력하면 \"localhost\"로 대체된다.\n기본값: \"test.net-meter.com\"",
+      "type": "string",
+      "default": "test.net-meter.com"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "port",
+    "protocol"
+  ],
+  "$defs": {
+    "Protocol": {
+      "description": "트래픽 프로토콜",
+      "oneOf": [
+        {
+          "description": "Raw TCP (HTTP 없이 바이트 교환)",
+          "type": "string",
+          "const": "tcp"
+        },
+        {
+          "description": "HTTP/1.1",
+          "type": "string",
+          "const": "http1"
+        },
+        {
+          "description": "HTTP/2 h2c (cleartext)",
+          "type": "string",
+          "const": "http2"
+        }
+      ]
+    }
+  }
+}

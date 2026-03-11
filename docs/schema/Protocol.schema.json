@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Protocol",
+  "description": "트래픽 프로토콜",
+  "oneOf": [
+    {
+      "description": "Raw TCP (HTTP 없이 바이트 교환)",
+      "type": "string",
+      "const": "tcp"
+    },
+    {
+      "description": "HTTP/1.1",
+      "type": "string",
+      "const": "http1"
+    },
+    {
+      "description": "HTTP/2 h2c (cleartext)",
+      "type": "string",
+      "const": "http2"
+    }
+  ]
+}

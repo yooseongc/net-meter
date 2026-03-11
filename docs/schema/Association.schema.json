@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Association",
+  "description": "ClientDef와 ServerDef 간의 트래픽 매핑.\n\nAssociation 자체는 ID 참조만 담당하고, IP 대역/프로토콜 등의\n세부 설정은 각각 ClientDef/ServerDef에 위임한다.",
+  "type": "object",
+  "properties": {
+    "client_id": {
+      "description": "참조하는 ClientDef의 id",
+      "type": "string"
+    },
+    "id": {
+      "description": "식별자",
+      "type": "string"
+    },
+    "load": {
+      "description": "per-association 부하 설정 오버라이드. None이면 TestConfig.default_load 사용.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LoadConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "name": {
+      "description": "사람이 읽기 좋은 이름",
+      "type": "string",
+      "default": ""
+    },
+    "payload": {
+      "description": "프로토콜별 페이로드 설정 (ServerDef.protocol과 일치해야 함)",
+      "$ref": "#/$defs/PayloadProfile"
+    },
+    "server_id": {
+      "description": "참조하는 ServerDef의 id",
+      "type": "string"
+    },
+    "vlan": {
+      "description": "VLAN 설정 (선택). None이면 태그 없음.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VlanConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "client_id",
+    "server_id",
+    "payload"
+  ],
+  "$defs": {
+    "HttpMethod": {
+      "description": "HTTP 요청 메서드",
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST"
+      ]
+    },
+    "HttpPayload": {
+      "description": "HTTP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "h2_max_concurrent_streams": {
+          "description": "HTTP/2 BW 모드: 연결당 최대 동시 스트림 수 (기본 10)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_extra_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "request_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "response_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "LoadConfig": {
+      "description": "부하 파라미터 (association당).\n\n- CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복.\n  `num_connections`는 전체 병렬 연결 루프 수(총량, 워커 수로 자동 분배).\n- CC/BW 모드: 전체 동시 연결 수 (`num_connections`)를 워커 수로 자동 분배.",
+      "type": "object",
+      "properties": {
+        "connect_timeout_ms": {
+          "description": "TCP 연결 타임아웃 (ms). None이면 5000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "num_connections": {
+          "description": "CPS: 전체 병렬 연결 루프 수 (워커 수로 자동 분배, 기본 1).\nCC/BW: 전체 유지할 동시 연결 수 (워커 수로 자동 분배).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "ramp_down_secs": {
+          "description": "종료 전 부하를 점진적으로 감소하는 구간 (초). 0이면 즉시 중지.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "ramp_up_secs": {
+          "description": "목표까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "response_timeout_ms": {
+          "description": "응답 완료 타임아웃 (ms). None이면 30000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      }
+    },
+    "PayloadProfile": {
+      "description": "프로토콜별 페이로드 설정",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tcp"
+            }
+          },
+          "$ref": "#/$defs/TcpPayload",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "http"
+            }
+          },
+          "$ref": "#/$defs/HttpPayload",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "TcpPayload": {
+      "description": "TCP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "rx_bytes": {
+          "description": "서버가 응답할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "tx_bytes": {
+          "description": "클라이언트가 연결당 전송할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "VlanConfig": {
+      "description": "VLAN 태그 설정",
+      "type": "object",
+      "properties": {
+        "inner_vid": {
+          "description": "Double tag 시 inner VLAN ID. None이면 single tag.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "outer_proto": {
+          "description": "Outer EtherType. 기본: Dot1Q (0x8100).",
+          "$ref": "#/$defs/VlanProto",
+          "default": "dot1_q"
+        },
+        "outer_vid": {
+          "description": "Outer VLAN ID (1~4094)",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "outer_vid"
+      ]
+    },
+    "VlanProto": {
+      "description": "VLAN 외부 EtherType 설정",
+      "oneOf": [
+        {
+          "description": "0x8100 — IEEE 802.1Q (표준)",
+          "type": "string",
+          "const": "dot1_q"
+        },
+        {
+          "description": "0x88a8 — IEEE 802.1ad (QinQ outer, carrier grade)",
+          "type": "string",
+          "const": "dot1_ad"
+        }
+      ]
+    }
+  }
+}

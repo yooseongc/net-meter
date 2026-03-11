@@ -164,7 +164,7 @@ impl Orchestrator {
         state: Arc<AppState>,
         tls_bundle: Option<crate::tls::TlsBundle>,
     ) -> anyhow::Result<()> {
-        let tcp_quickack = config.network.tcp_quickack;
+        let tcp_quickack = config.tcp_options.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
         let pair_addrs = config.local_server_addrs();
 
@@ -259,7 +259,7 @@ impl Orchestrator {
         let server_ns_name = ns.server_ns.clone();
         drop(ns_guard); // 락 해제 후 generator/responder 시작
 
-        let tcp_quickack = config.network.tcp_quickack;
+        let tcp_quickack = config.tcp_options.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
 
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
@@ -372,7 +372,7 @@ impl Orchestrator {
         .map_err(|e| anyhow::anyhow!("Policy routing setup failed: {}", e))?;
         *state.ext_policy_routing.lock().await = Some(policy_state);
 
-        let tcp_quickack = config.network.tcp_quickack;
+        let tcp_quickack = config.tcp_options.tcp_quickack;
         let global = Arc::clone(&state.global_metrics);
         let server_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.server_config));
         let client_h1_tls = tls_bundle.as_ref().map(|b| Arc::clone(&b.client_h1_config));

@@ -1,17 +1,18 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Latency 누적 히스토그램 버킷 (Prometheus le 스타일)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct HistogramBucket {
-    /// 상한 (ms). +Inf 버킷은 f64::INFINITY
-    pub le_ms: f64,
+    /// 상한 (ms). +Inf 버킷은 JSON에서 null로 직렬화된다.
+    pub le_ms: Option<f64>,
     /// le_ms 이하 누적 요청 수
     pub count: u64,
 }
 
 /// 프로토콜별 누적 카운터 (rate 제외, 합산 집계용)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PerProtocolSnapshot {
     pub connections_attempted: u64,
     pub connections_established: u64,
@@ -31,7 +32,7 @@ pub struct PerProtocolSnapshot {
 }
 
 /// 특정 시점의 계측 지표 스냅샷 (직렬화 가능, 프론트엔드 전송용)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct MetricsSnapshot {
     /// Unix timestamp (초)
     pub timestamp_secs: u64,
@@ -82,7 +83,7 @@ pub struct MetricsSnapshot {
     pub server_bytes_rx: u64,
 
     // --- Latency 히스토그램 버킷 (누적, Prometheus le 스타일) ---
-    /// 버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf]
+    /// 버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf(null)]
     pub latency_histogram: Vec<HistogramBucket>,
 
     // --- 프로토콜별 분리 집계 ---

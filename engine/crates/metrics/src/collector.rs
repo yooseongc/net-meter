@@ -366,9 +366,9 @@ fn extract_buckets(hist: &Mutex<Histogram<u64>>) -> Vec<HistogramBucket> {
     let mut result: Vec<HistogramBucket> = BOUNDS_MS
         .iter()
         .zip(counts.iter())
-        .map(|(&le_ms, &count)| HistogramBucket { le_ms, count })
+        .map(|(&le_ms, &count)| HistogramBucket { le_ms: Some(le_ms), count })
         .collect();
-    result.push(HistogramBucket { le_ms: f64::INFINITY, count: counts[n] });
+    result.push(HistogramBucket { le_ms: None, count: counts[n] });
     result
 }
 

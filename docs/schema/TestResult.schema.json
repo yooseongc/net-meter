@@ -1,0 +1,885 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TestResult",
+  "description": "시험 완료 후 저장되는 결과 레코드",
+  "type": "object",
+  "properties": {
+    "config": {
+      "description": "시험 설정 (전체 TestConfig 보존)",
+      "$ref": "#/$defs/TestConfig"
+    },
+    "elapsed_secs": {
+      "description": "실제 경과 시간 (초)",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "ended_at_secs": {
+      "description": "시험 종료 Unix timestamp (초)",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "final_snapshot": {
+      "description": "시험 종료 직전 최종 MetricsSnapshot",
+      "$ref": "#/$defs/MetricsSnapshot"
+    },
+    "id": {
+      "description": "고유 ID (UUID v4)",
+      "type": "string"
+    },
+    "started_at_secs": {
+      "description": "시험 시작 Unix timestamp (초)",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "id",
+    "config",
+    "started_at_secs",
+    "ended_at_secs",
+    "elapsed_secs",
+    "final_snapshot"
+  ],
+  "$defs": {
+    "Association": {
+      "description": "ClientDef와 ServerDef 간의 트래픽 매핑.\n\nAssociation 자체는 ID 참조만 담당하고, IP 대역/프로토콜 등의\n세부 설정은 각각 ClientDef/ServerDef에 위임한다.",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "description": "참조하는 ClientDef의 id",
+          "type": "string"
+        },
+        "id": {
+          "description": "식별자",
+          "type": "string"
+        },
+        "load": {
+          "description": "per-association 부하 설정 오버라이드. None이면 TestConfig.default_load 사용.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoadConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "description": "사람이 읽기 좋은 이름",
+          "type": "string",
+          "default": ""
+        },
+        "payload": {
+          "description": "프로토콜별 페이로드 설정 (ServerDef.protocol과 일치해야 함)",
+          "$ref": "#/$defs/PayloadProfile"
+        },
+        "server_id": {
+          "description": "참조하는 ServerDef의 id",
+          "type": "string"
+        },
+        "vlan": {
+          "description": "VLAN 설정 (선택). None이면 태그 없음.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VlanConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "client_id",
+        "server_id",
+        "payload"
+      ]
+    },
+    "ClientDef": {
+      "description": "클라이언트 IP 대역 정의.\n\n각 ClientDef는 독립된 소스 IP 풀을 나타낸다.\nNS 모드: veth-c1에 IP alias로 할당.\nExternal Port 모드: client_iface에 직접 할당.",
+      "type": "object",
+      "properties": {
+        "cidr": {
+          "description": "IP 대역 (CIDR 표기, e.g. \"10.10.1.1/24\").\nbase IP = 시작 IP, prefix_len = 서브넷 마스크 길이.",
+          "type": "string"
+        },
+        "count": {
+          "description": "이 대역에서 사용할 워커(IP) 수. None이면 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "id": {
+          "description": "고유 ID",
+          "type": "string"
+        },
+        "name": {
+          "description": "사람이 읽기 좋은 이름",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "cidr"
+      ]
+    },
+    "HistogramBucket": {
+      "description": "Latency 누적 히스토그램 버킷 (Prometheus le 스타일)",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "le_ms 이하 누적 요청 수",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "le_ms": {
+          "description": "상한 (ms). +Inf 버킷은 JSON에서 null로 직렬화된다.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "count"
+      ]
+    },
+    "HttpMethod": {
+      "description": "HTTP 요청 메서드",
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST"
+      ]
+    },
+    "HttpPayload": {
+      "description": "HTTP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "h2_max_concurrent_streams": {
+          "description": "HTTP/2 BW 모드: 연결당 최대 동시 스트림 수 (기본 10)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_extra_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "request_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "response_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "LoadConfig": {
+      "description": "부하 파라미터 (association당).\n\n- CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복.\n  `num_connections`는 전체 병렬 연결 루프 수(총량, 워커 수로 자동 분배).\n- CC/BW 모드: 전체 동시 연결 수 (`num_connections`)를 워커 수로 자동 분배.",
+      "type": "object",
+      "properties": {
+        "connect_timeout_ms": {
+          "description": "TCP 연결 타임아웃 (ms). None이면 5000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "num_connections": {
+          "description": "CPS: 전체 병렬 연결 루프 수 (워커 수로 자동 분배, 기본 1).\nCC/BW: 전체 유지할 동시 연결 수 (워커 수로 자동 분배).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "ramp_down_secs": {
+          "description": "종료 전 부하를 점진적으로 감소하는 구간 (초). 0이면 즉시 중지.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "ramp_up_secs": {
+          "description": "목표까지 점진적으로 증가하는 구간 (초). 0이면 즉시 전속력.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "response_timeout_ms": {
+          "description": "응답 완료 타임아웃 (ms). None이면 30000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        }
+      }
+    },
+    "MetricsSnapshot": {
+      "description": "특정 시점의 계측 지표 스냅샷 (직렬화 가능, 프론트엔드 전송용)",
+      "type": "object",
+      "properties": {
+        "active_connections": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "by_protocol": {
+          "description": "키: \"tcp\", \"http1\", \"http2\"",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PerProtocolSnapshot"
+          },
+          "default": {}
+        },
+        "bytes_rx_per_sec": {
+          "type": "number",
+          "format": "double"
+        },
+        "bytes_rx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_tx_per_sec": {
+          "type": "number",
+          "format": "double"
+        },
+        "bytes_tx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connect_mean_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "connect_p99_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "connections_attempted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_established": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_timed_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cps": {
+          "type": "number",
+          "format": "double"
+        },
+        "is_ramping_up": {
+          "type": "boolean",
+          "default": false
+        },
+        "latency_histogram": {
+          "description": "버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf(null)]",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HistogramBucket"
+          }
+        },
+        "latency_max_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_mean_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_p50_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_p95_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_p99_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "requests_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "responses_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rps": {
+          "type": "number",
+          "format": "double"
+        },
+        "server_bytes_rx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "server_bytes_tx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "server_requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_2xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_4xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_5xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_code_breakdown": {
+          "description": "상태코드 → 누적 응답 수 (예: {200: 5000, 404: 3})",
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^\\d+$": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        },
+        "status_other": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "threshold_violations": {
+          "description": "현재 시점에 위반된 임계값 항목 목록 (빈 배열이면 정상)",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "timestamp_secs": {
+          "description": "Unix timestamp (초)",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ttfb_mean_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "ttfb_p99_ms": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "timestamp_secs",
+        "connections_attempted",
+        "connections_established",
+        "connections_failed",
+        "connections_timed_out",
+        "active_connections",
+        "requests_total",
+        "responses_total",
+        "status_2xx",
+        "status_4xx",
+        "status_5xx",
+        "status_other",
+        "bytes_tx_total",
+        "bytes_rx_total",
+        "cps",
+        "rps",
+        "bytes_tx_per_sec",
+        "bytes_rx_per_sec",
+        "latency_mean_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "latency_p99_ms",
+        "latency_max_ms",
+        "connect_mean_ms",
+        "connect_p99_ms",
+        "ttfb_mean_ms",
+        "ttfb_p99_ms",
+        "server_requests",
+        "server_bytes_tx",
+        "server_bytes_rx",
+        "latency_histogram"
+      ]
+    },
+    "PayloadProfile": {
+      "description": "프로토콜별 페이로드 설정",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tcp"
+            }
+          },
+          "$ref": "#/$defs/TcpPayload",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "http"
+            }
+          },
+          "$ref": "#/$defs/HttpPayload",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "PerProtocolSnapshot": {
+      "description": "프로토콜별 누적 카운터 (rate 제외, 합산 집계용)",
+      "type": "object",
+      "properties": {
+        "active_connections": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_rx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_tx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_attempted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_established": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_timed_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "latency_mean_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_p99_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "requests_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "responses_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_2xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_4xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_5xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "connections_attempted",
+        "connections_established",
+        "connections_failed",
+        "connections_timed_out",
+        "active_connections",
+        "bytes_tx_total",
+        "bytes_rx_total",
+        "requests_total",
+        "responses_total",
+        "status_2xx",
+        "status_4xx",
+        "status_5xx",
+        "latency_mean_ms",
+        "latency_p99_ms"
+      ]
+    },
+    "Protocol": {
+      "description": "트래픽 프로토콜",
+      "oneOf": [
+        {
+          "description": "Raw TCP (HTTP 없이 바이트 교환)",
+          "type": "string",
+          "const": "tcp"
+        },
+        {
+          "description": "HTTP/1.1",
+          "type": "string",
+          "const": "http1"
+        },
+        {
+          "description": "HTTP/2 h2c (cleartext)",
+          "type": "string",
+          "const": "http2"
+        }
+      ]
+    },
+    "ServerDef": {
+      "description": "서버 엔드포인트 정의.\n\n프로토콜과 TLS 설정을 포함한다.\n여러 Association이 동일한 ServerDef를 참조할 수 있다.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "고유 ID",
+          "type": "string"
+        },
+        "ip": {
+          "description": "서버 IP. NS 모드: None이면 자동 할당 (10.20.1.{N}).\n로컬 모드: None이면 127.0.0.1.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "description": "사람이 읽기 좋은 이름",
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "protocol": {
+          "description": "사용 프로토콜",
+          "$ref": "#/$defs/Protocol"
+        },
+        "tls": {
+          "description": "TLS 활성화 (Http1 / Http2 프로토콜에만 적용, TCP는 무시)",
+          "type": "boolean",
+          "default": false
+        },
+        "tls_server_name": {
+          "description": "TLS SNI 서버 이름. IP 주소를 입력하면 \"localhost\"로 대체된다.\n기본값: \"test.net-meter.com\"",
+          "type": "string",
+          "default": "test.net-meter.com"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "port",
+        "protocol"
+      ]
+    },
+    "TcpOptions": {
+      "description": "시험 실행 시 적용되는 TCP 옵션.",
+      "type": "object",
+      "properties": {
+        "tcp_quickack": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "TcpPayload": {
+      "description": "TCP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "rx_bytes": {
+          "description": "서버가 응답할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "tx_bytes": {
+          "description": "클라이언트가 연결당 전송할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "TestConfig": {
+      "description": "전체 시험 설정.\n\nclients/servers 목록을 정의하고, associations로 연결을 매핑한다.",
+      "type": "object",
+      "properties": {
+        "associations": {
+          "description": "클라이언트 ↔ 서버 트래픽 매핑 목록",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Association"
+          }
+        },
+        "clients": {
+          "description": "클라이언트 IP 대역 정의 목록",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientDef"
+          }
+        },
+        "default_load": {
+          "description": "글로벌 기본 부하 설정 (association이 override 가능)",
+          "$ref": "#/$defs/LoadConfig"
+        },
+        "duration_secs": {
+          "description": "시험 지속 시간 (초). 0이면 수동 중지까지 계속.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "id": {
+          "description": "고유 ID (UUID v4)",
+          "type": "string"
+        },
+        "name": {
+          "description": "사람이 읽을 수 있는 이름",
+          "type": "string"
+        },
+        "servers": {
+          "description": "서버 엔드포인트 정의 목록",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServerDef"
+          }
+        },
+        "tcp_options": {
+          "description": "시험별 TCP 옵션.",
+          "$ref": "#/$defs/TcpOptions",
+          "default": {
+            "tcp_quickack": false
+          }
+        },
+        "test_type": {
+          "description": "시험 종류 (모든 association에 적용)",
+          "$ref": "#/$defs/TestType"
+        },
+        "thresholds": {
+          "description": "임계값 / 알람 설정",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "auto_stop_on_fail": false,
+            "max_error_rate_pct": null,
+            "max_latency_p99_ms": null,
+            "min_cps": null
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "test_type",
+        "duration_secs",
+        "default_load",
+        "clients",
+        "servers",
+        "associations"
+      ]
+    },
+    "TestType": {
+      "description": "시험 종류",
+      "oneOf": [
+        {
+          "description": "Connections Per Second: 각 워커가 connect→transact→close 루프를 최대 속도로 반복",
+          "type": "string",
+          "const": "cps"
+        },
+        {
+          "description": "Bandwidth: CC와 동일 구조, 페이로드 크기로 대역폭 결정",
+          "type": "string",
+          "const": "bw"
+        },
+        {
+          "description": "Concurrent Connections: num_connections 개의 연결을 동시에 유지",
+          "type": "string",
+          "const": "cc"
+        }
+      ]
+    },
+    "Thresholds": {
+      "description": "시험 Pass/Fail 임계값. 위반 시 대시보드 경고 또는 자동 중단.",
+      "type": "object",
+      "properties": {
+        "auto_stop_on_fail": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_error_rate_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "max_latency_p99_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "min_cps": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "VlanConfig": {
+      "description": "VLAN 태그 설정",
+      "type": "object",
+      "properties": {
+        "inner_vid": {
+          "description": "Double tag 시 inner VLAN ID. None이면 single tag.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "outer_proto": {
+          "description": "Outer EtherType. 기본: Dot1Q (0x8100).",
+          "$ref": "#/$defs/VlanProto",
+          "default": "dot1_q"
+        },
+        "outer_vid": {
+          "description": "Outer VLAN ID (1~4094)",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "outer_vid"
+      ]
+    },
+    "VlanProto": {
+      "description": "VLAN 외부 EtherType 설정",
+      "oneOf": [
+        {
+          "description": "0x8100 — IEEE 802.1Q (표준)",
+          "type": "string",
+          "const": "dot1_q"
+        },
+        {
+          "description": "0x88a8 — IEEE 802.1ad (QinQ outer, carrier grade)",
+          "type": "string",
+          "const": "dot1_ad"
+        }
+      ]
+    }
+  }
+}

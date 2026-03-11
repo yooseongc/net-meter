@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TestEvent",
+  "description": "실시간 이벤트 로그에 브로드캐스트되는 이벤트 타입.\n\nSSE 엔드포인트(`GET /api/events/stream`)를 통해 프론트엔드로 스트리밍된다.",
+  "oneOf": [
+    {
+      "description": "시험 시작",
+      "type": "object",
+      "properties": {
+        "config_name": {
+          "type": "string"
+        },
+        "duration_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "test_type": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "test_started"
+        }
+      },
+      "required": [
+        "type",
+        "config_name",
+        "test_type",
+        "duration_secs"
+      ]
+    },
+    {
+      "description": "시험 중지",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "test_stopped"
+        }
+      },
+      "required": [
+        "type",
+        "reason"
+      ]
+    },
+    {
+      "description": "Ramp-up 단계 시작",
+      "type": "object",
+      "properties": {
+        "ramp_up_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "ramp_up_started"
+        }
+      },
+      "required": [
+        "type",
+        "ramp_up_secs"
+      ]
+    },
+    {
+      "description": "Ramp-up 완료 (전속력 전환)",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ramp_up_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "Ramp-down 단계 시작",
+      "type": "object",
+      "properties": {
+        "ramp_down_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "ramp_down_started"
+        }
+      },
+      "required": [
+        "type",
+        "ramp_down_secs"
+      ]
+    },
+    {
+      "description": "Ramp-down 완료 (종료 처리 시작)",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ramp_down_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "NS 환경 준비 완료",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ns_setup_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "NS 환경 정리 완료",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ns_teardown_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "External Port 설정 완료",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ext_port_setup_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "External Port 정리 완료",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "ext_port_teardown_complete"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "description": "임계값 위반 감지",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "threshold_violation"
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "violations"
+      ]
+    },
+    {
+      "description": "오류",
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,884 @@
+# 개발 진행 사항
+
+## 전체 Phase 계획
+
+| Phase | 내용 | 상태 |
+|-------|------|------|
+| 1 | 기초 스켈레톤: Rust 워크스페이스, 크레이트 구조, Control API 서버 | ✅ 완료 |
+| 2 | Generator 고도화 + hdrhistogram Metrics | ✅ 완료 |
+| 3 | Responder: hyper 1.0 직접 사용, 서버 사이드 메트릭 | ✅ 완료 |
+| 4 | Namespace 관리: veth pair, setns, IP forwarding | ✅ 완료 |
+| 5 | 부가 기능: SO_REUSEPORT, 정적 파일 서빙, TCP_QUICKACK 등 | ✅ 완료 |
+| 6 | Frontend UI 고도화: 차트, 프로파일 편집기 | ✅ 완료 |
+| 7 | HTTP/2 지원: h2c / TLS h2 | ✅ 완료 (h2c) |
+| Booster | TCP 프로토콜, 다중 Pair 토폴로지, TestConfig 전면 전환 | ✅ 완료 |
+| 8 | TLS 지원: rustls + rcgen 자체 서명 인증서 | ✅ 완료 |
+| 9 | ~~eBPF/XDP 옵션~~ | 취소 |
+| 10 | Association 기반 설정 전환 + VLAN 지원 | ✅ 완료 |
+| 11 | External Port Mode: 물리 NIC 2개 연동, DUT 시험 | ✅ 완료 |
+| UI-R | Frontend UI 전면 리팩터 — shadcn/ui + Tailwind CSS v4 + Dark/Light 모드 | ✅ 완료 |
+| UI-1 | UI 개선 Phase A/B/C | ✅ 완료 |
+| UI-2 | UI 개선 Phase D — Client/Server 분리 + CPS/CC/BW 개념 수정 | ✅ 완료 |
+| UI-3 | 소규모 버그/UX 수정 (이벤트로그 타임스탬프, 저장 중복, 차트 선형화) | ✅ 완료 |
+| P3 | 총 클라이언트 수 기반 워커 자동 배분 (per-worker 설정 제거) | ✅ 완료 |
+| P4 | Ramp-down 지원 — 종료 전 부하 선형 감소, TestState::RampingDown | ✅ 완료 |
+| P5 | CC / BW 시험 동작 분리 — CC: 연결 유지 중심, BW: 처리량 최대화 | ✅ 완료 |
+| TLS-ALPN | ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 | ✅ 완료 |
+
+---
+
+## Phase 11: External Port Mode ✅
+
+**목표:** 물리 NIC 2개를 직접 사용하여 외부 DUT(피시험 장비)를 경유하는 트래픽 시험
+
+**달성 사항:**
+- [x] `engine/crates/ns/src/veth.rs`: 호스트 레벨 헬퍼 추가
+  - `flush_iface`, `del_ip`, `assign_ips` — IP 할당/제거
+  - `add_vlan_subif`, `add_qinq_subif`, `del_link` — VLAN subif (호스트 레벨)
+  - `set_neigh`, `del_neigh` — static ARP 엔트리 관리
+  - `check_iface` — NIC 존재 확인
+- [x] `engine/crates/ns/src/port.rs` (신규): External Port 설정/해제
+  - `ExternalPortState` — teardown을 위한 상태 추적 (할당 IP, VLAN subif 목록)
+  - `setup_external_port()` — NIC 확인 → flush → IP 할당 → VLAN subif → static ARP
+  - `teardown_external_port()` — VLAN subif 삭제 → IP 제거 → ARP 제거
+- [x] `engine/crates/ns/src/lib.rs`: port 모듈 export
+- [x] `engine/crates/control/src/event.rs`: `ExtPortSetupComplete`, `ExtPortTeardownComplete` 이벤트 추가
+- [x] `engine/crates/control/src/orchestrator.rs`: `NetworkMode::ExternalPort` 분기 구현
+  - `start_external_port_mode()` 메서드 추가
+  - `Orchestrator.ext_port_state` 필드 추가
+  - `do_stop()`에서 `teardown_external_port()` 호출
+- [x] `frontend/src/components/TestControl.tsx`: External Port 설정 폼 구현
+  - client_iface, server_iface 입력
+  - client/server gateway IP + MAC (static ARP용)
+  - flush/cleanup 토글 스위치
+  - mode 선택 시 기본값 자동 설정
+- [x] `frontend/src/components/TopologyView.tsx`: External Port 다이어그램 추가
+  - `Generator(eth1) → DUT → Responder(eth2)` 다이어그램
+  - NIC 이름, gateway 정보 표시
+- [x] `frontend/src/api/client.ts`: `ext_port_setup_complete`, `ext_port_teardown_complete` 이벤트 타입 추가
+- [x] `frontend/src/store/testStore.ts`: 새 이벤트 타입 핸들러 추가
+
+**토폴로지:**
+```
+[net-meter 단일 호스트]
+  Generator                             Responder
+  (client IPs bind)                     (server IPs bind)
+       |                                     |
+  eth1 (client_iface) ──→ [DUT] ──→  eth2 (server_iface)
+```
+
+**소켓 바인딩 전략:**
+- Generator: `bind(src_ip, 0)` — client IP를 소스로 고정
+- Responder: `TcpListener::bind(server_ip:port)` — 특정 server IP에 리슨
+
+**권한:** CAP_NET_ADMIN (또는 root) 필요
+
+---
+
+## UI 개선 계획 (UI-1 / UI-2)
+
+### Phase A — 레이아웃·UX (프론트엔드 전용)
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| A-1 | Sidebar → 상단 탭 바 전환. Header 아래 Monitor/Config/Topology/Profiles/Results 탭. 사이드바의 시험 상태 위젯은 Header 우측에 컴팩트 형태로 통합 | ✅ |
+| A-2 | 전체 패딩·여백 개선: 카드 내부, 버튼, 입력 필드, 테이블 행 높이, 섹션 간격 상향 | ✅ |
+| A-3 | Display 차트 선택 UI: checkbox → Toggle Button Group (pill 형태, active 시 색상 반전) | ✅ |
+| A-4 | Config 탭에서 Start/Stop 버튼 제거 — 시험 제어는 Monitor 탭에서만 | ✅ |
+
+### Phase B — 데이터 관리 (프론트엔드)
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| B-1 | Config 프로파일을 localStorage로 저장/불러오기. 키: `net-meter-profiles`. 백엔드 `/api/profiles` 미사용 | ✅ |
+| B-2 | Config 자동 저장 — 편집 중 debounce(500ms) 후 `net-meter-draft-config` 키로 localStorage 저장. 앱 재진입 시 복원 | ✅ |
+
+### Phase C — 버그 수정
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| C-1 | failed/completed 상태 진입 후 타이머 정지 및 정리. WS 스냅샷마다 `fetchStatus()` 호출을 active 상태(`preparing/ramping_up/running/stopping`)일 때만 수행. SSE `error` 이벤트 → `fetchStatus()` 추가. failed 진입 시 3초 후 snapshotHistory 정리 | ✅ |
+
+### Phase D — 데이터 구조 변경 (FE + BE, 미구현)
+
+| 항목 | 내용 |
+|------|------|
+| D-1 | Client/Server 설정 분리 + Association은 매핑만. `ClientDef { id, name, cidr }` / `ServerDef { id, name, ip, port, protocol, reuseaddr }` / `Association { client_id, server_id, payload, tls, vlan, load }`. Config 탭에 Clients / Servers / Associations 3개 서브섹션 |
+| D-2 | CPS/CC/BW 개념 수정. 각 client worker는 세션/트랜잭션 완료 즉시 다음 실행(rate limiter 없음). `cps_per_client`/`cc_per_client` 제거 → `num_connections`(CC/BW용 동시 연결 수)로 대체. Generator 루프 로직 변경 필요 |
+
+---
+
+## Phase 1: 기초 스켈레톤 ✅
+
+**목표:** 컴파일/실행 가능한 최소 구조 확립
+
+**달성 사항:**
+- [x] engine/ Rust 워크스페이스 구성 (6개 크레이트)
+  - `core`: 공통 타입 (TestProfile, TestState, MetricsSnapshot, NetMeterError)
+  - `metrics`: lock-free atomic 카운터 + 초당 집계 (Aggregator)
+  - `ns`: 네트워크 네임스페이스 관리 스텁
+  - `generator`: HTTP/1.1 트래픽 발생기 스텁
+  - `responder`: 가상 HTTP 서버 스텁
+  - `control`: REST API (axum 0.7) + 오케스트레이션 바이너리
+- [x] frontend/ React + Vite + TypeScript 기본 구조
+- [x] scripts/ 빌드/실행 스크립트 (setup.sh, build.sh)
+
+**아키텍처 결정:**
+- 비동기 런타임: `tokio full`
+- Control API: `axum 0.7`
+- Metrics: `std::sync::atomic` (lock-free, Relaxed ordering)
+- 상태 공유: `Arc<RwLock<>>` (control path only)
+- 로깅: `tracing` + `tracing-subscriber`
+- 에러: `thiserror` (라이브러리 크레이트), `anyhow` (바이너리)
+
+**Control API 엔드포인트:**
+```
+GET    /api/health           → {"status":"ok","version":"0.1.0"}
+GET    /api/status           → TestStatus {state, config, elapsed_secs, runtime}
+POST   /api/test/start       → 시험 시작 (body: TestProfile)
+POST   /api/test/stop        → 시험 중지
+GET    /api/metrics          → MetricsSnapshot (최신)
+GET    /api/metrics/ws       → WebSocket 실시간 스트림 (1초 간격)
+```
+
+---
+
+## Phase 2: Generator 고도화 + hdrhistogram Metrics ✅
+
+**목표:** 정밀한 CPS 제어 및 실측 latency 계산
+
+**달성 사항:**
+- [x] `tokio::time::interval` + `MissedTickBehavior::Skip` 기반 정밀 rate 제어
+  - CPS 100 목표 → 99.9998 달성 (오차 < 0.01%)
+- [x] 세마포어 backpressure: `max_inflight = target_cps * 2` (기본)
+- [x] connect timeout + response timeout (`tokio::time::timeout`)
+- [x] TCP connect latency, TTFB, 전체 latency 독립 계측
+- [x] `hdrhistogram`: p50/p95/p99 실제 계산 (`Mutex<Histogram<u64>>`)
+- [x] CPS / CC / BW 시험 모드 구현
+- [x] TestProfile 필드: `connect_timeout_ms`, `response_timeout_ms`, `max_inflight`
+- [x] MetricsSnapshot 필드: `connect_mean/p99`, `ttfb_mean/p99`, `cps`, `rps`
+
+**실측 결과 (CPS 100, 로컬호스트):**
+- CPS: 99.9988 (목표 100)
+- latency p50: 0.498ms, p95: 0.700ms, p99: 0.853ms
+- connect p99: 0.277ms, TTFB p99: 0.474ms
+- 실패율: 0%, 타임아웃: 0%
+
+---
+
+## Phase 3: Responder 고도화 ✅
+
+**목표:** 오버헤드 최소화, 서버 사이드 계측
+
+**달성 사항:**
+- [x] `axum` → `hyper 1.0` 직접 사용 (http-body-util, bytes, hyper-util)
+- [x] keep-alive 내장: `http1::Builder::new().keep_alive(true)`
+- [x] 서버 사이드 계측: `server_requests`, `server_bytes_tx` atomic 카운터
+- [x] `Responder::start()` (로컬 모드) / `start_in_ns()` (NS 모드) API 분리
+- [x] configurable response body 크기 (`response_body_bytes`)
+
+---
+
+## Phase 4: Namespace 관리 ✅
+
+**목표:** client/server 네임스페이스 자동 생성·정리, 격리 환경 시험
+
+**달성 사항:**
+- [x] `ip netns add/del` 명령 래퍼 (`manager.rs`)
+- [x] veth pair 생성/설정 (`veth.rs`): `create_pair`, `move_to_ns`, `set_ip`, `bring_up` 등
+- [x] NS 내 라우팅: `add_route_in_ns` (client NS → server NS, host 경유)
+- [x] IP 포워딩 활성화: `sysctl -w net.ipv4.ip_forward=1`
+- [x] teardown: `teardown()` 메서드 (시험 stop 시 NS·veth 자동 삭제)
+- [x] 권한 체크: `check_capability()` (root 또는 CAP_NET_ADMIN)
+- [x] `setns.rs`: `spawn_blocking` 내 `setns(2)` 기반 NS 귀속 소켓 생성
+  - `bind_listener_in_ns()`: server NS 내에서 `std::net::TcpListener` 바인드
+  - `create_socket_in_ns()`: client NS 내에서 `tokio::net::TcpSocket` 생성
+  - 완료 후 반드시 호스트 NS 복구 (tokio 스레드 풀 오염 방지)
+- [x] Generator NS 모드: `run_in_ns()` — client NS 진입 후 `current_thread` 런타임 구동
+- [x] Orchestrator 통합: `use_namespace=true` 시 NS 생성 → 시험 → 자동 정리
+- [x] TestProfile 필드: `use_namespace: bool`, `netns_prefix: String`
+
+**네트워크 토폴로지 (NS 모드):**
+```
+[client NS: 10.10.0.2/30]                 [server NS: 10.20.0.2/30]
+  veth-c1                                    veth-s1
+      |  (veth pair)                              |  (veth pair)
+  veth-c0 [host: 10.10.0.1/30] ── IP fwd ── veth-s0 [host: 10.20.0.1/30]
+```
+
+---
+
+## Phase 5: 부가 기능 ✅
+
+**목표:** 운용 편의성, 소켓 옵션, 페이로드 제어
+
+**달성 사항:**
+- [x] **SO_REUSEADDR + SO_REUSEPORT**: `socket2`로 구현 → 재시작 시 포트 충돌 없음
+- [x] **정적 파일 서빙**: `tower-http ServeDir` — 프론트엔드 빌드 결과물을 `:9090/`에서 서빙
+  - Vite `build.outDir`: `engine/crates/control/static/`
+  - SPA fallback: 알 수 없는 경로 → `index.html`
+  - `--web-dir` CLI 옵션, 생략 시 바이너리 옆 `static/` 자동 탐색
+- [x] **TCP_QUICKACK**: Delayed ACK 비활성화 — accept 직후 소켓에 적용 (Linux only, `libc::setsockopt`)
+- [x] **request body 전송**: `request_body_bytes` → `Content-Length` 헤더 + body 실제 전송
+- [x] **URL 길이 조정**: `path_extra_bytes` → 쿼리 파라미터로 패딩 (`?x=aaa...`)
+- [x] **serde default**: `use_namespace`, `netns_prefix`, `tcp_quickack`, `path_extra_bytes` 등 — JSON에 필드 누락 시 기본값 사용 (422 방지)
+- [x] **TestProfile 필드 추가**: `num_clients`, `num_servers` (현재 1 고정, 다중 NS 확장 예정)
+- [x] **`scripts/run.sh`**: 빌드 + 실행 통합 스크립트 (`--no-build`, `--skip-frontend`, `--release`, `--port`)
+
+---
+
+## Phase 6: Frontend UI 고도화 ✅
+
+**목표:** 실제 운용 가능한 계측 콘솔 수준 UI (Avalanche 참고)
+
+**달성 사항:**
+- [x] **헤더 글로벌 컨트롤**: elapsed/remaining 시간 + progress bar + Stop 버튼 항상 노출
+- [x] **4탭 내비게이션**: Dashboard / Topology / Profiles / Results
+- [x] **TestControl Accordion 재편**: Basic / Load / HTTP / Timing / Network 섹션, 모든 TestProfile 필드 노출
+- [x] **Profile import/export**: JSON 파일로 저장/불러오기
+- [x] **대시보드 목표값 vs 실측값**: TargetCard (달성률 progress bar 포함)
+- [x] **차트 개선**: 목표선(ReferenceLine), Active Connections(Area), BW(Stacked Area), Latency 시계열
+- [x] **Latency Histogram 차트**: BarChart (구간별 카운트 + p50/p95/p99 표시)
+- [x] **Error Breakdown 패널**: 연결 실패/타임아웃/4xx/5xx 상세 분류
+- [x] **Topology 뷰**: Client NS ↔ Host ↔ Server NS 다이어그램 + 실시간 지표 오버레이
+- [x] **Results 탭**: 시험 결과 목록, 상세 펼침, JSON/CSV 다운로드
+- [x] **백엔드 API 확장**:
+  - `MetricsSnapshot`에 `latency_histogram: Vec<HistogramBucket>` 추가 (누적 버킷, 11개)
+  - `elapsed_secs` 실제 구현 (`test_start_time` 추적)
+  - `GET /api/results`, `DELETE /api/results/:id` 신규
+  - 시험 종료 시 `TestResult` 자동 저장 (최대 50개)
+
+---
+
+## Phase 7: HTTP/2 h2c 지원 ✅
+
+**목표:** h2c (cleartext HTTP/2, Prior Knowledge) 지원
+
+**달성 사항:**
+- [x] `engine/Cargo.toml`: `h2 = "0.4"`, `http = "1"` 추가, `hyper` features에 `http2` 추가
+- [x] `core::TestProfile`: `h2_max_concurrent_streams: Option<u32>` 필드 추가
+- [x] **Generator `http2.rs`** (신규 크레이트 모듈):
+  - h2c Prior Knowledge 연결: `h2::client::Builder::new().handshake()`
+  - CPS 모드: 초당 신규 h2c 연결 + 1 스트림 + 세마포어 backpressure
+  - CC 모드: `target_cc`개 동시 h2c 연결, 각 연결에서 순차 스트림 반복
+  - BW 모드: `target_cc` 연결 × `h2_max_concurrent_streams` 동시 스트림 (multiplexing)
+  - `SendRequest::clone()` + `ready().await` 패턴으로 안전한 스트림 다중화
+  - TCP connect latency, TTFB, 전체 latency 독립 계측
+  - h2 flow control: `release_capacity()` 자동 처리
+- [x] **Generator `lib.rs`**: `protocol == Http2` 시 `http2::run()` 라우팅 (local & NS 모드 모두)
+- [x] **Responder `lib.rs`** (HTTP/2 서버):
+  - `start()` / `start_in_ns()`에 `protocol: Protocol` 파라미터 추가
+  - `hyper::server::conn::http2::Builder::new(TokioExecutor::new())` 기반 h2c 서버
+  - 기존 HTTP/1.1 (`http1::Builder`) 및 HTTP/2 (`http2::Builder`) 프로토콜 분기
+  - 동일한 `handle_request` 서비스 함수 재사용 (hyper body 타입 호환)
+- [x] **Orchestrator**: `profile.protocol` → responder에 전달
+- [x] **Frontend**:
+  - `TestProfile` 타입에 `h2_max_concurrent_streams?: number` 추가
+  - HTTP 섹션: `protocol === 'http2'` 시 "Max Concurrent Streams" 필드 표시
+
+**아키텍처 결정:**
+- h2c (cleartext HTTP/2 Prior Knowledge): TLS 없이 HTTP/2 직접 사용
+- TLS h2는 Phase 8 (rustls + rcgen)에서 처리
+- Generator: `h2` 0.4 crate (저수준 API, 세밀한 스트림 제어)
+- Responder: `hyper` 1.x `http2::Builder` (서비스 함수 재사용, 심플)
+- `SendRequest::clone()`으로 동일 TCP 연결에서 다중 스트림 워커 공유
+
+---
+
+## Booster Phase: TCP 프로토콜 + 다중 Pair 토폴로지 + TestConfig 전면 전환 ✅
+
+**목표:** 단일 HTTP 대상 → 다중 Pair (TCP+HTTP 혼합) 지원, 프로토콜 독립적 계측
+
+**달성 사항:**
+
+### 1. TestProfile → TestConfig 전면 전환
+- [x] **`TestConfig`** (구 TestProfile) 신규 구조 설계:
+  - `pairs: Vec<PairConfig>` — 다중 클라이언트/서버 쌍
+  - `default_load: LoadConfig` — pairs 공통 기본 부하 설정
+  - `ns_config: NsConfig` — 네임스페이스 설정 분리
+- [x] **`PairConfig`**: `id`, `protocol`, `client: ClientEndpoint`, `server: ServerEndpoint`, `payload: PayloadProfile`, `load: Option<LoadConfig>`
+- [x] **`PayloadProfile`** enum (`#[serde(tag="type")]`):
+  - `Tcp(TcpPayload)` — `client_tx_bytes`, `server_tx_bytes`
+  - `Http(HttpPayload)` — `method`, `path`, `request_body_bytes`, `response_body_bytes`, `h2_max_concurrent_streams`
+- [x] **`LoadConfig`**: `target_cps`, `target_cc`, `max_inflight`, `connect_timeout_ms`, `response_timeout_ms`
+- [x] **`Protocol`**: `Http1` | `Http2` | `Tcp` 추가
+- [x] `Display for Protocol` → `core/src/config.rs` (orphan rule 준수)
+
+### 2. TCP 프로토콜 지원
+- [x] **`responder/src/tcp.rs`** (신규): TCP accept loop + per-connection 핸들러
+  - client_tx bytes 수신 → server_tx bytes 응답 (ping-pong) 반복
+  - 서버 사이드 메트릭 기록 (global + proto dual collector)
+- [x] **Generator**: TCP CPS (신규 연결 ping-pong), CC/BW (스트리밍) 구현
+- [x] 멀티 Responder: `handles: Vec<JoinHandle<()>>`, `stop_all()` API
+
+### 3. 다중 Pair 네트워크 토폴로지
+- [x] **NS 토폴로지 개편 (/24 서브넷 + IP 앨리어싱)**:
+  - client NS: `10.10.1.1/24` (veth-c1)
+  - host: `veth-c0(10.10.1.254/24)`, `veth-s0(10.20.1.254/24)`
+  - server NS: `10.20.1.1/24` + 추가 서버별 앨리어스 (`10.20.1.N/24`)
+- [x] **`assign_pair_addrs()`**: pair 순서대로 서버 IP 할당, 추가 IP는 `ip addr add` 앨리어스
+- [x] **로컬 모드**: server_id 중복 체크로 동일 포트 이중 바인드 방지
+- [x] **Dual Collector 패턴**: 각 pair worker가 `global: Arc<Collector>` + `proto: Arc<Collector>` 양쪽에 기록
+- [x] **`MultiAggregator`**: 전체 rate 집계 + `by_protocol: HashMap<String, PerProtocolSnapshot>`
+
+### 4. Frontend 전면 개편
+- [x] **`api/client.ts`**: `TestConfig`, `PairConfig`, `PayloadProfile`, `LoadConfig`, `PerProtocolSnapshot` 신규 타입
+- [x] **`TestControl.tsx`** (완전 재작성): Pairs 테이블 + PairDialog 모달 편집기
+  - Protocol 선택에 따라 TCP/HTTP 페이로드 폼 전환
+  - 클라이언트/서버 엔드포인트, 선택적 per-pair 부하 오버라이드
+- [x] **`ProfileManager.tsx`**: TestConfig 기반 저장 프로파일 관리
+- [x] **`Results.tsx`**, **`TopologyView.tsx`**, **`MetricsPanel.tsx`**: `profile.*` → `config.*` 필드 경로 업데이트
+
+### 트러블슈팅
+- E0117 orphan rule: `Display for Protocol` → `core/src/config.rs`로 이동
+- E0521 borrow escape: `let pair_id = pair.id.clone()` before `tokio::spawn`
+- E0063 missing field: `MetricsSnapshot { by_protocol: HashMap::new(), ... }`
+- TS6133 unused `setField`: `PairDialog`에서 제거
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 0.08s
+npm run build → ✓ built in 2.16s
+```
+
+---
+
+## P1 개선: 임계값/알람 + Ramp-up + 이벤트 로그 + 상태코드 Breakdown ✅
+
+**목표:** 운용 수준 모니터링 기능 완성
+
+**달성 사항:**
+
+### 1. 임계값 / 알람 설정
+- [x] **`Thresholds`** 구조체 추가 (`core/src/config.rs`):
+  - `min_cps`, `max_error_rate_pct`, `max_latency_p99_ms`, `auto_stop_on_fail`
+- [x] **`TestConfig.thresholds`** 필드 추가 (`#[serde(default)]`)
+- [x] 1초 집계 루프(`main.rs`)에서 임계값 체크 → `MetricsSnapshot.threshold_violations` 설정
+- [x] `auto_stop_on_fail=true`이면 엔진 자동 중단
+- [x] **프론트엔드**: TestControl에 Thresholds 섹션 추가 (min_cps, max_error_rate, max_latency_p99, auto_stop 체크박스)
+- [x] MetricsPanel 상단에 위반 배너 (빨간 테두리, 위반 항목 목록)
+- [x] App.tsx 헤더에 ⚠ 알람 배지 (위반 시 점등)
+
+### 2. Ramp-up 제어
+- [x] **`LoadConfig.ramp_up_secs: u64`** 추가 (기본값 0)
+- [x] **`TestState::RampingUp`** 추가 (보라색 배지)
+- [x] **Orchestrator** `transition_to_running()`:
+  - `ramp_up_secs > 0`이면 `RampingUp` 상태로 시작, 이후 `Running`으로 전환
+  - `duration_secs` 타이머는 `RampingUp`도 포함하여 카운트
+- [x] **Generator CPS 루프**: 토큰 버킷 방식으로 선형 증가
+  - `token_acc += scale.min(1.0)` → 누적 ≥ 1이면 연결 허용
+  - HTTP/1.1, HTTP/2, TCP 모두 적용
+- [x] **프론트엔드**: Default Load 섹션에 "Ramp-up" 입력 추가
+- [x] MetricsPanel 상단 Ramp-up 진행 배너 (보라색)
+- [x] `StateBadge`에 `ramping_up` 색상 추가
+
+### 3. 실시간 이벤트 로그 패널 (SSE)
+- [x] **`control/src/event.rs`** (신규): `TestEvent` enum 정의
+  - `TestStarted`, `TestStopped`, `RampUpStarted`, `RampUpComplete`, `NsSetupComplete`, `NsTeardownComplete`, `ThresholdViolation`, `Error`
+- [x] **`AppState.event_tx: broadcast::Sender<TestEvent>`** 추가
+- [x] **`GET /api/events/stream`** SSE 엔드포인트 (`api/events.rs`) — `async_stream` 사용
+- [x] Orchestrator에서 이벤트 발행 (시험 시작/중지, NS 준비/정리, Ramp-up 단계)
+- [x] **프론트엔드**: `EventLog.tsx` 신규 컴포넌트
+  - 최근 100개 항목, 레벨별 색상 (info/warn/error)
+  - Dashboard 하단에 배치 (이벤트가 있을 때만 표시)
+  - "Clear" 버튼
+
+### 4. 상태코드 상세 Breakdown
+- [x] **`Collector.status_code_breakdown: Mutex<HashMap<u16, u64>>`** 추가
+- [x] `record_response()`에서 per-code 집계 (`status > 0`인 경우만)
+- [x] `MetricsSnapshot.status_code_breakdown: HashMap<u16, u64>` 추가
+- [x] **프론트엔드**: `StatusCodeTable` 컴포넌트 — 코드별 응답 수 그리드 표시
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 0.08s
+npm run build → ✓ built in 2.11s
+```
+
+---
+
+## Phase 8: TLS 지원 ✅
+
+**목표:** 자체 서명 인증서로 TLS 1.2/1.3 시험
+
+**달성 사항:**
+- [x] `rustls 0.23` + `rcgen 0.13` + `tokio-rustls 0.26` 워크스페이스 의존성 추가
+- [x] `PairConfig.tls: bool` 필드 추가 (`#[serde(default)]`)
+- [x] `control/src/tls.rs` (신규): rcgen 자체 서명 인증서 생성 + `TlsBundle { server_config, client_config }`
+  - `NoCertVerifier`: 클라이언트 인증서 검증 비활성화 (IP 주소 직접 연결 허용)
+- [x] Responder: TLS accept 지원
+  - `start_server`, `start_server_in_ns`에 `tls_config: Option<Arc<ServerConfig>>` 파라미터 추가
+  - `TlsAcceptor::accept()` 후 `hyper` HTTP/1.1 / HTTP/2 서비스 연결
+  - `serve_http<I>` 제너릭 함수로 평문/TLS 통합 처리
+- [x] Generator HTTP/1.1 TLS 지원 (`http1.rs`):
+  - `run()`, 내부 함수에 `tls: Option<Arc<ClientConfig>>` 파라미터 추가
+  - CPS 모드: TCP connect → TLS handshake → 제너릭 `send_and_receive<S: AsyncReadExt + AsyncWriteExt + Unpin>`
+  - CC/BW 모드: TCP connect → TLS handshake → `tokio::io::split` → `DynReader/DynWriter` (Box<dyn>) → `do_keepalive_request`
+- [x] Generator HTTP/2 TLS 지원 (`http2.rs`):
+  - `connect_h2()` 함수: TLS 유무에 따라 `h2::client::Builder::new().handshake(tls_stream or tcp)` 분기
+  - `SendRequest<Bytes>` 타입 통합 (Connection은 task spawn)
+- [x] Orchestrator: TLS pair 있으면 `tls::build()` 호출, server/client config 분리 전달
+- [x] Frontend: PairDialog에 TLS 체크박스 추가 (HTTP 프로토콜에만 표시)
+- [x] `api/client.ts`: `PairConfig.tls?: boolean` 추가
+
+**아키텍처 결정:**
+- 인증서: rcgen 자체 서명, SAN `localhost` (NoCertVerifier로 IP 연결도 허용)
+- 클라이언트: `NoCertVerifier` — 인증서 검증 없음 (시험 도구 특성)
+- ServerName: `"localhost"` 고정 (SNI 전용, 검증과 무관)
+- TLS handshake latency: connect_latency에 포함 (TCP + TLS 합산)
+- DynReader/DynWriter: `Box<dyn AsyncRead/AsyncWrite + Unpin + Send>` — keep-alive TLS 지원
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 0.12s
+npm run build → ✓ built in 2.48s
+```
+
+---
+
+## Phase 10: Association 기반 설정 전환 + VLAN 지원 ✅
+
+**목표:** Avalanche 스타일 "클라이언트 수 기반 설정", IP 대역 지정, VLAN 단일/이중 태그 지원
+
+**달성 사항:**
+
+### 1. 핵심 타입 전환 (engine/crates/core/src/config.rs)
+- [x] `PairConfig` → **`Association`**: `client_net: ClientNet`, `server: ServerEndpoint`, `vlan: Option<VlanConfig>`
+- [x] `ClientEndpoint` → **`ClientNet`**: `base_ip`, `count: Option<u32>`, `prefix_len: u8`
+- [x] `NsConfig` → **`NetworkConfig`**: `mode: NetworkMode`, `ns: NsOptions`, `ext: Option<ExternalPortOptions>`
+- [x] **`NetworkMode`**: `Loopback | Namespace | ExternalPort` enum
+- [x] **`VlanConfig`**: `outer_vid`, `inner_vid: Option<u16>`, `outer_proto: VlanProto`
+- [x] **`VlanProto`**: `Dot1Q | Dot1AD`
+- [x] **`LoadConfig`**: `cps_per_client` (alias: target_cps), `cc_per_client` (alias: target_cc), `max_inflight_per_client` (alias: max_inflight)
+- [x] **`TestConfig.total_clients: u32`** — associations 간 균등 분배
+- [x] **`TestConfig.associations`** (alias: pairs), **`TestConfig.network`** (alias: ns_config) — Phase 10 당시 기준 역호환 alias
+
+### 2. NS 관리 개편 (engine/crates/ns/)
+- [x] **`assign_client_ips_in_ns()`**: base_ip + count 기반 다중 IP 앨리어스 할당 (이미 존재하면 무시)
+- [x] **`add_vlan_subif_in_ns()`**: 단일 VLAN 태그 subif 생성
+- [x] **`add_qinq_subif_in_ns()`**: QinQ (이중 태그) subif 생성
+- [x] **`setup_associations()`**: `assign_pair_addrs()` 대체 — VLAN subif 처리, client IP 목록 반환
+  - 반환: `(pair_addrs, server_binds, client_ip_lists: HashMap<String, Vec<String>>)`
+
+### 3. Generator per-client IP 바인딩 (engine/crates/generator/)
+- [x] `start()` 파라미터에 `client_ips: &HashMap<String, Vec<String>>` 추가
+- [x] IP 목록이 있으면 각 IP마다 worker 1개 생성 (총 워커 = IP 수)
+- [x] TCP/HTTP1/HTTP2 모든 프로토콜: `src_ip: Option<IpAddr>` 파라미터로 `TcpSocket::bind()` 소켓 바인딩
+
+### 4. Orchestrator 개편 (engine/crates/control/src/orchestrator.rs)
+- [x] `ns_config.use_namespace` → `network.mode == NetworkMode::Namespace` 분기
+- [x] `ExternalPort` → 미구현 오류 반환 (Phase 11)
+- [x] `setup_associations()` 호출 및 `client_ips` Generator에 전달
+
+### 5. Frontend 전면 개편
+- [x] **`api/client.ts`**: 모든 타입 Phase 10으로 전환 (Association, ClientNet, VlanConfig, NetworkConfig 등)
+- [x] **`TestControl.tsx`** (완전 재작성): AssociationDialog (ClientNet, VLAN 설정), total_clients, NetworkMode 선택
+- [x] **`TopologyView.tsx`**: `ns_config.use_namespace` → `network.mode === 'namespace'`, `pairs[0]` → `associations[0]`
+- [x] **`MetricsPanel.tsx`**: `target_cps` → `cps_per_client`, `target_cc` → `cc_per_client`
+- [x] **`ProfileManager.tsx`**: `pairs` → `associations`, client 컬럼에 base_ip/prefix_len 표시
+- [x] **`Results.tsx`**: `pairs` → `associations`
+- [x] **`TestRunPanel.tsx`**: `pairs.length pair(s)` → `associations.length association(s)`
+
+**VLAN 구현 방식 (Linux):**
+```bash
+# single tag
+ip link add link veth-c1 name veth-c1.100 type vlan id 100 proto 802.1Q
+# double tag (QinQ)
+ip link add link veth-c1 name veth-c1.100 type vlan id 100 proto 802.1ad
+ip link add link veth-c1.100 name veth-c1.100.200 type vlan id 200 proto 802.1Q
+```
+커널 모듈 `8021q` 필요.
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 3.86s
+npm run build → ✓ built in 2.63s
+```
+
+> 현재 구현 메모
+>
+> - 프로파일 저장은 프론트 `localStorage`만 사용하며 `/api/profiles`는 제거됨.
+> - 네트워크 모드는 `TestConfig`가 아니라 서버 실행 시 `--mode`로 결정됨.
+> - 시험 프로파일의 소켓 계열 설정은 현재 `tcp_options`로 정리되어 있음.
+
+---
+
+## P2: UI 개선 ✅
+
+**목표:** Avalanche 수준 UI 완성도
+
+**달성 사항:**
+
+### 1. 좌측 사이드바 내비게이션
+- [x] 헤더: 로고 + 글로벌 컨트롤(Stop, 알람, WS)만 유지
+- [x] 좌측 사이드바 (160px): 세로 탭 (Monitor/Config/Topology/Profiles/Results) + 시험 상태 정보 (배지, 경과시간, progress bar)
+- [x] 메인 영역: flex-grow
+- [x] 1600px+: Dashboard 3단 (TestRunPanel | MetricsPanel | EventLog) — `useWide(1600)` 훅
+
+### 2. 결과 비교 뷰
+- [x] Results 탭 각 행에 체크박스 추가 (최대 2개)
+- [x] 선택된 2개에 "Compare Selected" 버튼 표시
+- [x] ResultCompare 컴포넌트: 나란히 테이블 + DeltaCell (Δ값 + % 증감률, 개선/악화 색상)
+- [x] 비교 지표: CPS/RPS/성공률/ActiveConn/p50/p99/TTFB/Connect/TX/RX/연결수/실패수
+
+### 3. 서버 사이드 RX 지표
+- [x] `core/src/snapshot.rs`: `server_bytes_rx: u64` 추가
+- [x] `metrics/src/collector.rs`: `server_bytes_rx: AtomicU64`, `record_server_rx()` 메서드 추가
+- [x] `responder/src/tcp.rs`: 루프 내 read 성공 후 `record_server_rx()` 호출
+- [x] `responder/src/lib.rs`: `handle_http`에서 Content-Length 헤더 기반 수신 bytes 기록
+- [x] `api/client.ts`: `MetricsSnapshot.server_bytes_rx: number` 추가
+- [x] `TopologyView.tsx`: Server 노드에 "Srv RX" MB 표시
+
+**검증 결과:**
+```
+cargo check → Finished `dev` profile in 1.89s
+npm run build → ✓ built in 2.41s
+```
+
+---
+
+## Phase 11: External Port Mode ✅
+
+**목표:** 물리 NIC 2개(inbound/outbound 포트)를 사용, 외부 DUT를 경유하는 실제 시험
+
+상세 설계: `old_docs/design-next.md`
+
+**트래픽 흐름:**
+```
+[net-meter Generator] --(eth1: client_iface)--> [외부 DUT] --(eth2: server_iface)--> [net-meter Responder]
+```
+
+**구현 완료 사항:**
+- [x] `NetworkMode::ExternalPort` 추가
+- [x] `ExternalPortOptions { client_iface, server_iface, client_gateway, client_gateway_mac, ... }`
+- [x] `engine/crates/ns/src/port.rs` (신규): NIC IP 할당, VLAN subif, static ARP entry
+- [x] Orchestrator: ExternalPort 분기 (NS 생성/삭제 스킵, port.rs 셋업/정리)
+- [x] Generator: `bind(client_ip, 0)`, 필요 시 `SO_BINDTODEVICE`
+- [x] Responder: `bind(server_ip, port)` (0.0.0.0 대신 특정 IP)
+- [x] Frontend: External Port 설정 폼 + Topology 뷰 DUT 다이어그램
+- [x] 정책 라우팅: DUT short-circuit 방지 (table 191/192)
+- [x] veth-dut 테스트베드: 단일 머신 External Port 모드 검증
+
+---
+
+## UI-3: 소규모 버그/UX 수정 ✅
+
+| 항목 | 내용 |
+|------|------|
+| 이벤트로그 타임스탬프 | `new Date().toLocaleTimeString()` → 명시적 `HH:MM:SS` 포맷 (초 항상 표시) |
+| Config 저장 중복 | "Save to Profiles" 클릭 시 항상 새 UUID 생성 → 기존 항목 덮어쓰기 방지 |
+| 차트 선형화 | Recharts `type="monotone"` (베지에) → `type="linear"` (직선 보간, 실측값 정확 표시) |
+
+---
+
+## NS 토폴로지 개선: routed 방식 전환 ✅
+
+**문제:**
+1. 기존 bridge 방식은 모든 IP를 `10.10.1.0/24` 단일 서브넷으로 하드코딩 — 다중 서브넷 불가
+2. `ServerDef.ip` 무시: 서버 IP가 항상 `10.10.1.201+`로 하드코딩됨
+3. 두 번째 시험 실행 시 서버 IP alias 재추가 실패 (`ip addr add` "File exists")
+4. `10.10.2.1` 클라이언트 → `10.10.1.201` 서버: 서버 NS에 `10.10.2.0/24` route 없어 불통
+
+**변경:**
+- `NamespaceManager::setup()`: bridge 제거 → routed 토폴로지
+  - host link IPs: `veth-c0=10.255.1.1/30`, `veth-s0=10.255.2.1/30`
+  - NS link IPs: client NS `10.255.1.2/30`, server NS `10.255.2.2/30`
+  - 각 NS에 default gw 설정 (client: `10.255.1.1`, server: `10.255.2.1`)
+  - 호스트 IP forwarding 활성화
+- `NamespaceManager::setup_network()`:
+  - 서버 IP: `ServerDef.ip` 우선 사용, None이면 `10.20.1.{1,2,...}` 자동 할당
+  - 서버 IP는 `/32`로 server NS에 할당
+  - 호스트 routes: client CIDR → `upper_iface`, server IP/32 → `lower_iface` (`ip route replace` 멱등)
+  - 두 번째 실행 시 "already exists" 오류 안전 처리
+- `veth.rs`: `replace_route_dev()`, `enable_ip_forward()` 추가
+- `TopologyView.tsx`: bridge 표시 → "Host Router" 표시
+
+**결과 토폴로지:**
+```
+[client NS]                   [host: ip_forward=1]              [server NS]
+  10.255.1.2/30 ←─link─→  veth-c0: 10.255.1.1/30            10.255.2.2/30
+  client CIDRs              veth-s0: 10.255.2.1/30  ─link─→  server IPs (/32)
+  default gw: 10.255.1.1                                        default gw: 10.255.2.1
+```
+임의 client/server 서브넷 지원. server.ip 필드 완전 적용.
+
+---
+
+## UI-4: 소규모 UX 개선 ✅
+
+| 항목 | 내용 |
+|------|------|
+| EventLog INF → INFO | 레벨 배지 `INF` → `INFO` (4글자), `w-9` → `w-10` 폭 조정 |
+| Client Workers 제거 | ClientDialog에서 "Workers (count)" 입력 제거, 테이블 Workers 컬럼 제거, `defaultClientDef` count 제거 |
+| Default Load Total Clients | 라벨을 "Total Clients"로 통일, 기본값 1 → 100, 설명 문구 개선 |
+| 차트 고정폭 + Range 선택 | 시계열 차트를 항상 고정 range 크기(기본 1분)로 표시, X축 domain 고정, 패딩으로 왼쪽 여백 확보. Range 버튼(30s/1m/2m/5m) 추가 |
+
+---
+
+## P3: 총 클라이언트 수 기반 워커 자동 배분 (계획)
+
+**목표:** 사용자가 "전체 클라이언트 수"를 입력하면 association / CIDR 수에 따라 워커를 자동 분배
+
+**현재 문제:**
+- `ClientDef.count` = "이 CIDR에서 워커 몇 개"로 직접 입력
+- CPS/CC/BW 모두 `num_connections` = "워커당 연결 수" 개념으로 노출되어 혼란
+
+**변경 방향:**
+- `TestConfig`에 `total_clients: u32` 추가 (전체 시험의 총 워커/연결 수)
+- `ClientDef.count` 제거 (또는 내부 계산용으로 숨김)
+- 배분 규칙: association이 N개이고 각 association의 client CIDR 비중에 따라 `total_clients / N` 워커 자동 할당
+- Generator `lib.rs`: `worker_count = total_clients / association_count` (나머지는 첫 번째 association에 배분)
+- UI: Default Load 섹션의 `num_connections` 레이블을 "Total Clients" 또는 "Total Connections"로 전환
+  - CPS: Total Clients = 총 병렬 루프 수 (전체 동시 connect→transact→close 루프)
+  - CC: Total Clients = 총 동시 연결 수 (전체 persistent connection 수)
+  - BW: Total Clients = 총 동시 연결 수 (각 연결에서 최대 처리량 추구)
+
+**백엔드 변경 파일:**
+- `core/src/config.rs`: `total_clients` 필드 추가, `ClientDef.count` 계산 로직 변경
+- `generator/src/lib.rs`: `worker_count` 계산 로직 변경
+
+**프론트엔드 변경 파일:**
+- `api/client.ts`: `TestConfig.total_clients` 추가
+- `TestControl.tsx`: `num_connections` → `total_clients` UI 전환, `ClientDef.count` 입력 제거
+
+---
+
+## P4: Ramp-down 지원 (계획)
+
+**목표:** 시험 종료 전 부하를 서서히 줄여 급격한 종료 방지, 실제 장비 시험에서 graceful shutdown
+
+**변경 방향:**
+
+### 백엔드
+- `LoadConfig.ramp_down_secs: u64` 추가 (기본값 0 = 비활성)
+- `TestState::RampingDown` 추가
+- Orchestrator: `duration_secs - ramp_down_secs` 시점에 `RampingDown` 상태 전환 + 이벤트 발행
+- Generator 루프: `RampingDown` 기간 동안 load scale 1.0 → 0.0 선형 감소
+  - ramp-up과 동일한 토큰 버킷 방식, 단 역방향
+  - CPS: 연결 생성 속도 감소
+  - CC/BW: 신규 요청 억제, 기존 연결은 자연 종료 대기
+- 이벤트: `RampDownStarted`, `RampDownComplete` 추가 (`control/src/event.rs`)
+
+### 프론트엔드
+- `TestControl.tsx`: Default Load 섹션에 "Ramp-down" 입력 추가 (`ramp_down_secs`)
+- `MetricsPanel.tsx`: Ramp-down 진행 배너 (주황색, ramp-up과 구분)
+- `StateBadge`: `ramping_down` 색상 추가 (주황색 계열)
+- `api/client.ts`: `LoadConfig.ramp_down_secs` 추가
+
+### 변경 파일 목록
+- `engine/crates/core/src/config.rs`
+- `engine/crates/control/src/event.rs`
+- `engine/crates/control/src/orchestrator.rs`
+- `engine/crates/generator/src/http1.rs`, `http2.rs`, `tcp.rs`
+- `frontend/src/api/client.ts`
+- `frontend/src/components/TestControl.tsx`, `MetricsPanel.tsx`
+
+---
+
+## P5: CC / BW 시험 동작 분리 (계획)
+
+**목표:** CC와 BW가 동일 로직(`run_cc_bw`)을 공유하는 문제 해결, 목적에 맞는 동작 분리
+
+**현재 문제:**
+- `http1.rs`, `http2.rs`, `tcp.rs` 모두 `TestType::Cc | TestType::Bw => run_cc_bw()`
+- 두 모드가 완전히 동일하게 동작 — 사용자가 차이를 인식 불가
+
+**CC vs BW 의도된 차이:**
+
+| 항목 | CC | BW |
+|------|----|----|
+| 목적 | 연결 유지 능력 측정 | 처리량 최대화 |
+| 연결 관리 | N개 persistent 연결 유지 | N개 persistent 연결 유지 |
+| 요청 패턴 | 연결당 1개 순차 요청, 응답 후 짧은 idle | 연결당 최대 속도 반복 (no delay) |
+| HTTP/2 스트림 | 1 stream per connection | `h2_max_concurrent_streams`까지 다중화 |
+| 페이로드 의도 | 작게 (연결 생존 측정) | 크게 (대역폭 포화) |
+| 측정 포인트 | active conn 수, latency under concurrency, 연결 유지율 | tx/rx bytes/s, goodput, CPU 사용률 |
+
+**변경 방향:**
+- `run_cc_bw()` → `run_cc()` / `run_bw()` 분리
+- CC (`run_cc`): 연결 유지 + `tokio::time::sleep(small_idle)` 또는 응답 후 idle 구간 삽입으로 "점유형" 연결 시뮬레이션
+- BW (`run_bw`): 기존 로직 유지 (최대 속도 루프) + HTTP/2에서 `h2_max_concurrent_streams` 활용
+- TCP CC: ping-pong 간격을 조절 가능하게 (`idle_ms` 필드)
+- `TcpPayload`에 `idle_ms: Option<u64>` 추가 고려
+
+**변경 파일:**
+- `engine/crates/generator/src/http1.rs`
+- `engine/crates/generator/src/http2.rs`
+- `engine/crates/generator/src/tcp.rs`
+- `engine/crates/core/src/config.rs` (TcpPayload.idle_ms 추가 시)
+
+---
+
+## External Port 정책 라우팅 + veth-dut 테스트베드 ✅
+
+**목표:** External Port 모드에서 DUT 우회(short-circuit) 방지 및 단일 머신 테스트베드 구축
+
+**달성 사항:**
+
+### 정책 라우팅 (Policy Routing)
+
+**문제:** net-meter 호스트에 upper/lower 인터페이스가 모두 있으면 Generator가 서버 IP로 접속 시 커널이 lower_iface로 직접 라우팅하여 DUT를 우회함.
+
+**해결:**
+- [x] `ns/veth.rs`: 정책 라우팅 프리미티브 추가
+  - `add_ip_rule` / `del_ip_rule` (ip rule)
+  - `add_route_table_dev` / `flush_route_table` (ip route table)
+  - `is_rule_exists_error()` — 중복 추가 무시용
+- [x] `ns/port.rs`:
+  - `PolicyRoutingState` 구조체 추가
+  - `setup_policy_routing()`: 양방향 정책 라우팅 설정
+    - table 191: client CIDR → default dev upper_iface (Generator → DUT 방향 강제)
+    - table 192: server IP/32 → default dev lower_iface (Responder → DUT 방향 강제)
+  - `teardown_policy_routing()`: ip rule 제거 + route table flush
+  - `setup_external_port()`에서 불필요한 promisc 설정 제거
+- [x] `ns/lib.rs`: PolicyRoutingState / setup·teardown_policy_routing re-export
+- [x] `control/state.rs`: `ext_policy_routing: Mutex<Option<PolicyRoutingState>>` 필드 추가
+- [x] `control/orchestrator.rs`:
+  - `start_external_port_mode()`: IP 할당 후 정책 라우팅 자동 설정
+  - `do_stop()`: ExternalPort 모드 종료 시 정책 라우팅 자동 정리
+
+**트래픽 흐름 (DUT=proxy ARP 활성화 필요):**
+```
+Generator (upper, src=client_ip)
+  → ip rule: from client_cidr → table 191
+  → table 191: default dev upper_iface
+  → upper_iface → DUT → lower_iface → Responder
+
+Responder (lower, src=server_ip)
+  → ip rule: from server_ip/32 → table 192
+  → table 192: default dev lower_iface
+  → lower_iface → DUT → upper_iface → Generator
+```
+
+### veth-dut 테스트베드
+
+**단일 머신에서 External Port 모드를 검증하기 위한 veth + bridge 토폴로지:**
+
+```
+veth-c0 (upper) ←── veth-c1 ──┐
+                                br-dut  (L2 bridge, DUT 시뮬레이션)
+veth-s0 (lower) ←── veth-s1 ──┘
+```
+
+- Proxy ARP 불필요: ARP broadcast가 bridge를 통해 자연스럽게 전달됨
+- 정책 라우팅으로 단락 방지
+- `testbed/veth-dut/setup.sh`: 토폴로지 생성 + 빌드 + net-meter 실행 (Ctrl+C 시 자동 정리)
+- `testbed/veth-dut/teardown.sh`: 비상 정리용
+
+**실행:**
+```bash
+sudo env PATH="$PATH" ./testbed/veth-dut/setup.sh
+```
+
+---
+
+## TLS-ALPN: ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 ✅
+
+**목표:** HTTP/2 over TLS 시 ALPN으로 프로토콜 협상, 사용자가 TLS SNI 서버 이름을 설정 가능하게 함
+
+**달성 사항:**
+
+### 1. TlsBundle 분리 (`control/src/tls.rs`)
+- [x] `TlsBundle.client_config` → `client_h1_config` + `client_h2_config` 분리
+- [x] 인증서 SAN: `"localhost"` → `"test.net-meter.com"` 변경
+- [x] ALPN 설정:
+  - `server_config`: `["h2", "http/1.1"]` (둘 다 수락)
+  - `client_h1_config`: `["http/1.1"]`
+  - `client_h2_config`: `["h2"]`
+
+### 2. ServerDef에 tls_server_name 필드 추가 (`core/src/config.rs`)
+- [x] `ServerDef.tls_server_name: String` 추가 (`#[serde(default = "default_tls_server_name")]`)
+- [x] 기본값: `"test.net-meter.com"`
+
+### 3. Generator TLS 설정 분리 (`generator/src/lib.rs`)
+- [x] `start()` 파라미터: `tls_client_config` → `tls_h1_config + tls_h2_config` 분리
+- [x] 프로토콜별 TLS config 선택: `Http2` → `tls_h2_config`, 나머지 → `tls_h1_config`
+- [x] `tls_server_name` 연쇄 전달: `start()` → `dispatch()` → `http1::run()` / `http2::run()`
+
+### 4. SNI 해석 헬퍼 (`generator/src/http1.rs`, `http2.rs`)
+- [x] `resolve_tls_sni(name: &str) -> ServerName<'static>` 함수 추가
+  - IP 주소 입력 시 RFC 6066 규정에 따라 `"localhost"`로 자동 대체
+  - 그 외: 입력값 그대로 사용
+- [x] 하드코딩된 `"localhost"` SNI 3곳(http1) + 1곳(http2) 제거 → `resolve_tls_sni()` 호출로 대체
+
+### 5. Orchestrator 업데이트 (`control/src/orchestrator.rs`)
+- [x] 3개 모드(Loopback/Namespace/ExternalPort) 모두 `client_h1_tls` + `client_h2_tls` 분리 추출 및 전달
+
+### 6. 프론트엔드
+- [x] `api/client.ts`: `ServerDef.tls_server_name?: string` 추가
+- [x] `TestControl.tsx`: TLS 활성화 시 SNI 서버 이름 입력 필드 표시, IP 입력 시 localhost 대체 안내 문구 표시
+
+**동작:**
+- TLS + HTTP/1.1: ALPN `"http/1.1"` 협상, SNI = 입력값 또는 default
+- TLS + HTTP/2: ALPN `"h2"` 협상, SNI = 입력값 또는 default
+- 서버 이름에 IP 주소 입력 시: SNI는 `"localhost"` 사용 (RFC 6066 준수)
+- 인증서 검증은 항상 NoCertVerifier로 우회 (시험 도구 특성)
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 16.89s
+npm run build → ✓ built in 3.30s
+```
+
+---
+
+## Code Quality 개선 (#1~#7, #11) ✅
+
+**목표:** 코드 품질 조사 결과 발견된 잠재적 버그 및 안정성 문제 수정
+
+### 수정 내역
+
+#### #1 HTTP/1.1 상태코드 파싱 (`generator/src/http1.rs`)
+- `send_and_receive`: 첫 32바이트 슬라이스 파싱 → BufReader + `read_line()` 기반 줄 단위 파싱으로 전환
+- 응답 헤더를 완전한 줄 단위로 파싱 → 상태코드 누락 없음
+
+#### #2 Content-Length body 읽기 (`generator/src/http1.rs`)
+- `do_keepalive_request`: `read_exact()` → `read()` 루프로 교체
+- 서버가 Content-Length보다 일찍 연결 닫아도 에러 대신 수신량만 기록
+- `send_and_receive`: Content-Length 파싱 후 정확한 body 읽기 지원
+
+#### #3 CPS 단일 연결 deadline 체크 (`generator/src/http1.rs`, `http2.rs`, `tcp.rs`)
+- 기존: 요청 시작 전에만 deadline 체크 → 느린 요청이 duration 초과 가능
+- 수정: `wait_deadline(deadline) => break`를 `tokio::select!`에 추가 → 요청 중에도 즉시 중단
+
+#### #4 H2 백그라운드 태스크 추적 (`generator/src/http2.rs`)
+- `connect_h2()`: `JoinHandle<()>` 반환으로 변경 (`(SendRequest, JoinHandle)` 튜플)
+- `single_request_h2`: 요청 완료 후 `conn_handle.abort()` 호출
+- `h2_cc_worker`, `connection_worker`: conn_handle 보관 후 루프 종료 시 abort
+
+#### #5 Responder graceful stop (`responder/src/lib.rs`, `control/src/orchestrator.rs`)
+- `stop_all()`: `fn` → `async fn`으로 변경, 200ms grace period 추가
+- Generator 중지 후 호출하면 대부분의 처리 중인 요청이 완료됨
+- `orchestrator.rs`: 모든 `stop_all()` 호출에 `.await` 추가 (4곳)
+
+#### #6 TestConfig 검증 (`core/src/config.rs`, `control/src/orchestrator.rs`)
+- `TestConfig::validate()` 메서드 추가:
+  - clients/servers/associations 비어있는지 확인
+  - 모든 association의 client_id / server_id 존재 여부 확인
+  - 모든 client의 CIDR 파싱 유효성 확인
+  - 모든 server의 port 유효성 확인 (port=0 방지)
+- `orchestrator.start()`: 시험 시작 전 `validate()` 호출, 실패 시 TestState::Failed
+
+#### #7 localStorage 쿼터 에러 처리 (`frontend/src/components/TestControl.tsx`)
+- auto-save의 `localStorage.setItem()`에 try-catch 추가
+- QuotaExceededError 등 저장 실패 시 `console.warn`으로 기록 (조용한 실패)
+
+#### #11 Histogram lock poisoning 복구 (`metrics/src/collector.rs`)
+- `warn!` + skip 패턴 → `e.into_inner()` 복구 패턴으로 전환
+- 워커 패닉으로 lock이 poisoned되어도 이후 기록이 계속 작동
+- 영향 범위: `record_connect_latency`, `record_ttfb`, `record_response`, `read_hist`, `extract_buckets`
+
+**검증:**
+```
+cargo check → Finished `dev` profile in 3.41s
+npm run build → ✓ built in 3.77s
+```
+
+---
+
+## 참고 문서
+
+- `testbed/topology.md`: 네트워크 토폴로지 및 수동 설정 예시
+- `CLAUDE.md`: 프로젝트 요구사항 전체
+- `old_docs/MODE.md`: 시험 모드(CPS/CC/BW × TCP/HTTP/1.1/HTTP/2) 동작 및 계측 지표 정리
+- `docs/TODO.md`: 잔여 작업 목록

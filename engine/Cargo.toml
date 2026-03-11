@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["full"] }
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 
 # web framework (control API)
 axum = { version = "0.7", features = ["ws", "macros"] }
@@ -55,9 +56,12 @@ thiserror = "1"
 # utilities
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures-util = "0.3"
 
 # metrics
 hdrhistogram = "7"
+schemars = "1.2"
 
 # SSE 스트림 (이벤트 로그 API)
 async-stream = "0.3"

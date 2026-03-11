@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { Save, Download, Upload, Plus, Pencil, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
 import {
-  TestConfig, TestType, Protocol, HttpMethod,
+  isTestConfig, TestConfig, TestType, Protocol, HttpMethod,
   Association, ClientDef, ServerDef,
-  PayloadProfile, LoadConfig, NetworkConfig,
+  PayloadProfile, LoadConfig, TcpOptions,
   TcpPayload, HttpPayload, Thresholds, VlanConfig,
 } from '../api/client'
 import { useTestStore } from '../store/testStore'
@@ -46,7 +46,7 @@ const defaultAssociation = (clients: ClientDef[], servers: ServerDef[], idx: num
   payload: defaultHttpPayload(),
 })
 
-const defaultNetworkConfig = (): NetworkConfig => ({
+const defaultTcpOptions = (): TcpOptions => ({
   tcp_quickack: false,
 })
 
@@ -68,7 +68,7 @@ const makeDefaultConfig = (): TestConfig => {
       server_id: server.id,
       payload: defaultHttpPayload(),
     }],
-    network: defaultNetworkConfig(),
+    tcp_options: defaultTcpOptions(),
     thresholds: {},
   }
 }
@@ -398,18 +398,12 @@ function AssociationDialog({
 
 const DRAFT_KEY = 'net-meter-draft-config'
 
-function isValidConfig(c: unknown): c is TestConfig {
-  if (!c || typeof c !== 'object') return false
-  const o = c as Record<string, unknown>
-  return Array.isArray(o.clients) && Array.isArray(o.servers) && Array.isArray(o.associations)
-}
-
 function loadDraft(): TestConfig | null {
   try {
     const raw = localStorage.getItem(DRAFT_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
-    return isValidConfig(parsed) ? parsed : null
+    return isTestConfig(parsed) ? parsed : null
   } catch {
     return null
   }
@@ -461,8 +455,8 @@ export default function TestControl() {
     setConfig((prev) => ({ ...prev, default_load: { ...prev.default_load, [key]: n } }))
   }
 
-  const setNetworkField = <K extends keyof NetworkConfig>(key: K, val: NetworkConfig[K]) =>
-    setConfig((prev) => ({ ...prev, network: { ...prev.network, [key]: val } }))
+  const setTcpOption = <K extends keyof TcpOptions>(key: K, val: TcpOptions[K]) =>
+    setConfig((prev) => ({ ...prev, tcp_options: { ...(prev.tcp_options ?? {}), [key]: val } }))
 
   const setThresholdField = (key: keyof Thresholds, raw: string | boolean) => {
     const val = typeof raw === 'boolean' ? raw : (raw === '' ? undefined : Number(raw))
@@ -544,8 +538,9 @@ export default function TestControl() {
     const reader = new FileReader()
     reader.onload = (ev) => {
       try {
-        const data = JSON.parse(ev.target?.result as string) as TestConfig
-        setConfig({ ...data, id: uuidv4() })
+        const parsed = JSON.parse(ev.target?.result as string)
+        if (!isTestConfig(parsed)) return
+        setConfig({ ...parsed, id: uuidv4() })
       } catch { /* ignore */ }
     }
     reader.readAsText(file)
@@ -720,15 +715,15 @@ export default function TestControl() {
             </label>
           </Section>
 
-          {/* Network */}
-          <Section title="Network" defaultOpen={false}>
+          {/* TCP Options */}
+          <Section title="TCP Options" defaultOpen={false}>
             <p className="text-xs text-muted-foreground">
-              네트워크 모드(loopback / namespace / external_port)는 서버 시작 시 CLI 인수로 결정됩니다.
+              네트워크 모드(loopback / namespace / external_port)는 서버 시작 시 런타임 설정으로 결정됩니다.
             </p>
             <label className="flex items-center gap-2.5 text-sm cursor-pointer">
               <Switch
-                checked={config.network.tcp_quickack ?? false}
-                onCheckedChange={(v) => setNetworkField('tcp_quickack', v)}
+                checked={config.tcp_options?.tcp_quickack ?? false}
+                onCheckedChange={(v) => setTcpOption('tcp_quickack', v)}
               />
               TCP_QUICKACK (disable delayed ACK)
             </label>

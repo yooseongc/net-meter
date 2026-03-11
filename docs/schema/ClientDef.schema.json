@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientDef",
+  "description": "클라이언트 IP 대역 정의.\n\n각 ClientDef는 독립된 소스 IP 풀을 나타낸다.\nNS 모드: veth-c1에 IP alias로 할당.\nExternal Port 모드: client_iface에 직접 할당.",
+  "type": "object",
+  "properties": {
+    "cidr": {
+      "description": "IP 대역 (CIDR 표기, e.g. \"10.10.1.1/24\").\nbase IP = 시작 IP, prefix_len = 서브넷 마스크 길이.",
+      "type": "string"
+    },
+    "count": {
+      "description": "이 대역에서 사용할 워커(IP) 수. None이면 1.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "default": null,
+      "minimum": 0
+    },
+    "id": {
+      "description": "고유 ID",
+      "type": "string"
+    },
+    "name": {
+      "description": "사람이 읽기 좋은 이름",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "cidr"
+  ]
+}

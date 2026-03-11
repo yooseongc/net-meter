@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TestType",
+  "description": "시험 종류",
+  "oneOf": [
+    {
+      "description": "Connections Per Second: 각 워커가 connect→transact→close 루프를 최대 속도로 반복",
+      "type": "string",
+      "const": "cps"
+    },
+    {
+      "description": "Bandwidth: CC와 동일 구조, 페이로드 크기로 대역폭 결정",
+      "type": "string",
+      "const": "bw"
+    },
+    {
+      "description": "Concurrent Connections: num_connections 개의 연결을 동시에 유지",
+      "type": "string",
+      "const": "cc"
+    }
+  ]
+}

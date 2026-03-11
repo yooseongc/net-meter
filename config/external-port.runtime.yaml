@@ -1,0 +1,10 @@
+host: 0.0.0.0
+port: 9090
+log_level: info
+
+network:
+  mode: external_port
+  upper_iface: eth1
+  lower_iface: eth2
+  mtu: 1500
+  ns_prefix: nm

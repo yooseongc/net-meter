@@ -3,6 +3,13 @@
 네트워크 성능 계측기 / 트래픽 시험기.
 Avalanche와 유사한 구조로 CPS · BW · CC 시험을 수행하며, Linux 네트워크 네임스페이스 또는 물리 NIC 2개로 격리된 가상 Client/Server 환경을 제공합니다.
 
+관련 문서:
+
+- 진행상황 / 운영 메모: [docs/PROCESS.md](/home/yooseongc/net-meter/docs/PROCESS.md)
+- 시험 모드 상세: [docs/MODE.md](/home/yooseongc/net-meter/docs/MODE.md)
+- 스키마 기준 / 생성 산출물: [docs/SCHEMA.md](/home/yooseongc/net-meter/docs/SCHEMA.md)
+- 과거 설계 / 이력: [old_docs](/home/yooseongc/net-meter/old_docs)
+
 ## 주요 기능
 
 - **CPS (Connections Per Second)** — 초당 신규 연결 수 측정, latency 분포 (p50/p95/p99)
@@ -82,12 +89,15 @@ engine/crates/
 ### 옵션
 
 ```bash
+./scripts/run-dev.sh --config config/loopback.runtime.yaml
 ./scripts/run-dev.sh --port 8080          # 포트 변경
-./scripts/run-dev.sh --skip-frontend      # 프론트 재빌드 생략
+./scripts/run-dev.sh --no-fe-build        # 프론트 재빌드 생략
 ./scripts/run-dev.sh --no-build           # 빌드 없이 바로 실행
-./scripts/run-dev.sh --release            # 최적화 빌드
 sudo env PATH="$PATH" ./scripts/run-dev.sh --mode namespace  # Namespace 모드
 ```
+
+`run-dev.sh`는 현재 debug 빌드 전용입니다. 릴리스 빌드는 `cargo build --release`와 `frontend npm run build`를 별도로 수행해야 합니다.
+런타임 설정은 YAML 파일로 둘 수 있고, 같은 항목을 CLI 인자로 넘기면 YAML 값을 override 합니다. 예시는 [config](/home/yooseongc/net-meter/config) 디렉터리를 참조하세요.
 
 ### External Port 모드 (veth-dut 테스트베드)
 
@@ -114,38 +124,63 @@ cd engine && cargo run --bin net-meter -- --port 9090
 cd frontend && npm run dev   # → http://localhost:3000
 ```
 
+## CLI
+
+웹 UI 없이 Control API를 조작하는 전용 CLI `net-meter-cli`를 제공합니다.
+
+```bash
+cd engine
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 health
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 status
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 start --file /path/to/test.json
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 monitor --watch-until-done
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 events
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 stop
+```
+
+`run` 서브커맨드는 시험 시작 후 모니터링까지 연속으로 수행합니다.
+
+```bash
+cd engine
+cargo run --bin net-meter-cli -- --url http://127.0.0.1:9090 run --file /path/to/test.json --interval 1
+```
+
+`--json` 플래그를 주면 `health`, `status`, `metrics`, `results`, `monitor`, `events` 출력에 JSON 형식을 사용할 수 있습니다.
+
 ## API
 
 | Method | Path | 설명 |
 |--------|------|------|
 | GET | `/api/health` | 헬스체크 |
-| GET | `/api/status` | 현재 시험 상태 (state, config, elapsed_secs) |
+| GET | `/api/status` | 현재 시험 상태 (state, config, elapsed_secs, runtime) |
 | POST | `/api/test/start` | 시험 시작 (body: TestConfig JSON) |
 | POST | `/api/test/stop` | 시험 중지 |
 | GET | `/api/metrics` | 최신 MetricsSnapshot |
 | GET | `/api/metrics/ws` | WebSocket 실시간 스트림 (1초 간격) |
-| GET | `/api/profiles` | 저장된 TestConfig 목록 |
-| POST | `/api/profiles` | TestConfig 저장 |
-| DELETE | `/api/profiles/:id` | TestConfig 삭제 |
 | GET | `/api/results` | 완료된 시험 결과 목록 (최대 50개, 최신순) |
 | DELETE | `/api/results/:id` | 결과 삭제 |
 | GET | `/api/events/stream` | SSE 실시간 이벤트 로그 |
+
+프로파일 관리는 브라우저 `localStorage`를 사용합니다. 서버 API로 저장되지 않으므로 브라우저를 바꾸면 프로파일이 공유되지 않습니다.
+시험 설정 스키마의 기준은 백엔드 [config.rs](/home/yooseongc/net-meter/engine/crates/core/src/config.rs)이며, 프론트 import/localStorage도 현재 `TestConfig` 포맷만 지원합니다.
 
 ### TestConfig 예시
 
 ```json
 {
+  "id": "cfg-1",
   "name": "CPS 시험",
   "test_type": "cps",
   "duration_secs": 30,
-  "network": { "mode": "loopback" },
-  "clients": [{ "id": "c1", "cidr": "127.0.0.1/8", "count": 10 }],
-  "servers": [{ "id": "s1", "port": 8080, "protocol": "http1" }],
+  "tcp_options": { "tcp_quickack": false },
+  "clients": [{ "id": "c1", "name": "client-1", "cidr": "127.0.0.1/8", "count": 10 }],
+  "servers": [{ "id": "s1", "name": "server-1", "port": 8080, "protocol": "http1", "tls": false }],
   "associations": [{
-    "id": "a1", "client_id": "c1", "server_id": "s1",
-    "payload": { "type": "Http", "method": "GET", "path": "/" }
+    "id": "a1", "name": "assoc-1", "client_id": "c1", "server_id": "s1",
+    "payload": { "type": "http", "method": "GET", "path": "/" }
   }],
-  "default_load": { "num_connections": 100 }
+  "default_load": { "num_connections": 100 },
+  "thresholds": {}
 }
 ```
 
@@ -171,10 +206,7 @@ TestConfig {
     load?: LoadConfig      -- per-association 오버라이드
     vlan?: VlanConfig      -- 단일/이중 태그
   }]
-  network: {
-    mode: loopback / namespace / external_port
-    ns: NsOptions
-    ext?: ExternalPortOptions { client_iface, server_iface, ... }
+  tcp_options: {
     tcp_quickack: bool
   }
   thresholds?: {
@@ -182,6 +214,11 @@ TestConfig {
   }
 }
 ```
+
+주의:
+
+- 실제 네트워크 모드(`loopback` / `namespace` / `external_port`)는 `TestConfig`가 아니라 서버 기동 CLI 옵션 `--mode`로 결정됩니다.
+- `/api/status` 응답에는 시험 프로파일(`config`)과 별도로 런타임 환경(`runtime.mode`, `runtime.upper_iface`, `runtime.lower_iface`)이 포함됩니다.
 
 ## 측정 지표
 
@@ -223,6 +260,13 @@ threshold_violations: [위반 항목]
 | UI-R | Frontend UI 전면 리팩터: Tailwind CSS v4 + shadcn/ui + Dark/Light 모드 | ✅ |
 | UI-1~4 | UI 개선 (레이아웃, 데이터, 버그, UX) | ✅ |
 | veth-dut | 단일 머신 External Port 검증 테스트베드 | ✅ |
+| TLS-ALPN | ALPN 기반 TLS h2 + 사용자 정의 SNI 서버 이름 | ✅ |
+
+## 현재 구현 메모
+
+- 프론트 정적 산출물은 [frontend/vite.config.ts](/home/yooseongc/net-meter/frontend/vite.config.ts) 기준으로 단일 JS/CSS 번들 정책을 사용합니다.
+- 프로파일은 브라우저 `localStorage`에 저장됩니다.
+- 결과 목록은 서버 메모리에만 유지되므로 프로세스 재시작 시 초기화됩니다.
 
 ## 라이선스
 

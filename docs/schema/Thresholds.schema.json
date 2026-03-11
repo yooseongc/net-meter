@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thresholds",
+  "description": "시험 Pass/Fail 임계값. 위반 시 대시보드 경고 또는 자동 중단.",
+  "type": "object",
+  "properties": {
+    "auto_stop_on_fail": {
+      "type": "boolean",
+      "default": false
+    },
+    "max_error_rate_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    },
+    "max_latency_p99_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    },
+    "min_cps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double",
+      "default": null
+    }
+  }
+}

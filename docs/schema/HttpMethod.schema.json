@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HttpMethod",
+  "description": "HTTP 요청 메서드",
+  "type": "string",
+  "enum": [
+    "GET",
+    "POST"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HistogramBucket",
+  "description": "Latency 누적 히스토그램 버킷 (Prometheus le 스타일)",
+  "type": "object",
+  "properties": {
+    "count": {
+      "description": "le_ms 이하 누적 요청 수",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "le_ms": {
+      "description": "상한 (ms). +Inf 버킷은 JSON에서 null로 직렬화된다.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    }
+  },
+  "required": [
+    "count"
+  ]
+}

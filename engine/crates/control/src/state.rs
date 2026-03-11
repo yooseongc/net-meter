@@ -47,9 +47,6 @@ pub struct AppState {
     /// 현재 실행 중인 시험 설정
     pub active_config: RwLock<Option<TestConfig>>,
 
-    /// 저장된 시험 설정 목록 (id → config)
-    pub saved_configs: RwLock<HashMap<String, TestConfig>>,
-
     /// 글로벌 lock-free 계측 수집기
     pub global_metrics: Arc<Collector>,
 
@@ -98,7 +95,6 @@ impl AppState {
             server_net,
             test_state: RwLock::new(TestState::Idle),
             active_config: RwLock::new(None),
-            saved_configs: RwLock::new(HashMap::new()),
             global_metrics,
             protocol_metrics: RwLock::new(HashMap::new()),
             latest_snapshot: RwLock::new(MetricsSnapshot::default()),

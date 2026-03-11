@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PayloadProfile",
+  "description": "프로토콜별 페이로드 설정",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tcp"
+        }
+      },
+      "$ref": "#/$defs/TcpPayload",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "http"
+        }
+      },
+      "$ref": "#/$defs/HttpPayload",
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "$defs": {
+    "HttpMethod": {
+      "description": "HTTP 요청 메서드",
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST"
+      ]
+    },
+    "HttpPayload": {
+      "description": "HTTP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "h2_max_concurrent_streams": {
+          "description": "HTTP/2 BW 모드: 연결당 최대 동시 스트림 수 (기본 10)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_extra_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "request_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "response_body_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ]
+    },
+    "TcpPayload": {
+      "description": "TCP 페이로드 프로파일",
+      "type": "object",
+      "properties": {
+        "rx_bytes": {
+          "description": "서버가 응답할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "tx_bytes": {
+          "description": "클라이언트가 연결당 전송할 바이트 수",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

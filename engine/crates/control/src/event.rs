@@ -1,9 +1,10 @@
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// 실시간 이벤트 로그에 브로드캐스트되는 이벤트 타입.
 ///
 /// SSE 엔드포인트(`GET /api/events/stream`)를 통해 프론트엔드로 스트리밍된다.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TestEvent {
     /// 시험 시작

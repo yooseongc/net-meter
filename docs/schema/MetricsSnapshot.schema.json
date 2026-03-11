@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MetricsSnapshot",
+  "description": "특정 시점의 계측 지표 스냅샷 (직렬화 가능, 프론트엔드 전송용)",
+  "type": "object",
+  "properties": {
+    "active_connections": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "by_protocol": {
+      "description": "키: \"tcp\", \"http1\", \"http2\"",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PerProtocolSnapshot"
+      },
+      "default": {}
+    },
+    "bytes_rx_per_sec": {
+      "type": "number",
+      "format": "double"
+    },
+    "bytes_rx_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "bytes_tx_per_sec": {
+      "type": "number",
+      "format": "double"
+    },
+    "bytes_tx_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connect_mean_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "connect_p99_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "connections_attempted": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_established": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_failed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_timed_out": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "cps": {
+      "type": "number",
+      "format": "double"
+    },
+    "is_ramping_up": {
+      "type": "boolean",
+      "default": false
+    },
+    "latency_histogram": {
+      "description": "버킷: [0.5ms, 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, +Inf(null)]",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/HistogramBucket"
+      }
+    },
+    "latency_max_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_mean_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_p50_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_p95_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_p99_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "requests_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "responses_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "rps": {
+      "type": "number",
+      "format": "double"
+    },
+    "server_bytes_rx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "server_bytes_tx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "server_requests": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_2xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_4xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_5xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_code_breakdown": {
+      "description": "상태코드 → 누적 응답 수 (예: {200: 5000, 404: 3})",
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "patternProperties": {
+        "^\\d+$": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "status_other": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "threshold_violations": {
+      "description": "현재 시점에 위반된 임계값 항목 목록 (빈 배열이면 정상)",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "timestamp_secs": {
+      "description": "Unix timestamp (초)",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "ttfb_mean_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "ttfb_p99_ms": {
+      "type": "number",
+      "format": "double"
+    }
+  },
+  "required": [
+    "timestamp_secs",
+    "connections_attempted",
+    "connections_established",
+    "connections_failed",
+    "connections_timed_out",
+    "active_connections",
+    "requests_total",
+    "responses_total",
+    "status_2xx",
+    "status_4xx",
+    "status_5xx",
+    "status_other",
+    "bytes_tx_total",
+    "bytes_rx_total",
+    "cps",
+    "rps",
+    "bytes_tx_per_sec",
+    "bytes_rx_per_sec",
+    "latency_mean_ms",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "latency_p99_ms",
+    "latency_max_ms",
+    "connect_mean_ms",
+    "connect_p99_ms",
+    "ttfb_mean_ms",
+    "ttfb_p99_ms",
+    "server_requests",
+    "server_bytes_tx",
+    "server_bytes_rx",
+    "latency_histogram"
+  ],
+  "$defs": {
+    "HistogramBucket": {
+      "description": "Latency 누적 히스토그램 버킷 (Prometheus le 스타일)",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "le_ms 이하 누적 요청 수",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "le_ms": {
+          "description": "상한 (ms). +Inf 버킷은 JSON에서 null로 직렬화된다.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "count"
+      ]
+    },
+    "PerProtocolSnapshot": {
+      "description": "프로토콜별 누적 카운터 (rate 제외, 합산 집계용)",
+      "type": "object",
+      "properties": {
+        "active_connections": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_rx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_tx_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_attempted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_established": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "connections_timed_out": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "latency_mean_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "latency_p99_ms": {
+          "type": "number",
+          "format": "double"
+        },
+        "requests_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "responses_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_2xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_4xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status_5xx": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "connections_attempted",
+        "connections_established",
+        "connections_failed",
+        "connections_timed_out",
+        "active_connections",
+        "bytes_tx_total",
+        "bytes_rx_total",
+        "requests_total",
+        "responses_total",
+        "status_2xx",
+        "status_4xx",
+        "status_5xx",
+        "latency_mean_ms",
+        "latency_p99_ms"
+      ]
+    }
+  }
+}

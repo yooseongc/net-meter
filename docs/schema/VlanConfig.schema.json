@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VlanConfig",
+  "description": "VLAN 태그 설정",
+  "type": "object",
+  "properties": {
+    "inner_vid": {
+      "description": "Double tag 시 inner VLAN ID. None이면 single tag.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "default": null,
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "outer_proto": {
+      "description": "Outer EtherType. 기본: Dot1Q (0x8100).",
+      "$ref": "#/$defs/VlanProto",
+      "default": "dot1_q"
+    },
+    "outer_vid": {
+      "description": "Outer VLAN ID (1~4094)",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    }
+  },
+  "required": [
+    "outer_vid"
+  ],
+  "$defs": {
+    "VlanProto": {
+      "description": "VLAN 외부 EtherType 설정",
+      "oneOf": [
+        {
+          "description": "0x8100 — IEEE 802.1Q (표준)",
+          "type": "string",
+          "const": "dot1_q"
+        },
+        {
+          "description": "0x88a8 — IEEE 802.1ad (QinQ outer, carrier grade)",
+          "type": "string",
+          "const": "dot1_ad"
+        }
+      ]
+    }
+  }
+}

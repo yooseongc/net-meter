@@ -4,10 +4,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use net_meter_core::{TestConfig, TestState};
-use serde::Serialize;
+use net_meter_core::{NetworkMode, TestConfig, TestState};
 use tracing::info;
 
+use crate::schema::{RuntimeConfig, TestStatus};
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -15,16 +15,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/status", get(status_handler))
         .route("/test/start", post(start_handler))
         .route("/test/stop", post(stop_handler))
-}
-
-#[derive(Serialize)]
-struct TestStatus {
-    state: TestState,
-    config: Option<TestConfig>,
-    elapsed_secs: Option<u64>,
-    network_mode: String,
-    upper_iface: String,
-    lower_iface: String,
 }
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> {
@@ -36,19 +26,19 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> Json<TestStatus> 
         .await
         .map(|t| t.elapsed().as_secs());
 
-    let network_mode = match state.server_net.mode {
-        net_meter_core::NetworkMode::Loopback => "loopback",
-        net_meter_core::NetworkMode::Namespace => "namespace",
-        net_meter_core::NetworkMode::ExternalPort => "external_port",
-    }.to_string();
-
     Json(TestStatus {
         state: test_state,
         config,
         elapsed_secs,
-        network_mode,
-        upper_iface: state.server_net.upper_iface.clone(),
-        lower_iface: state.server_net.lower_iface.clone(),
+        runtime: RuntimeConfig {
+            mode: match state.server_net.mode {
+                NetworkMode::Loopback => NetworkMode::Loopback,
+                NetworkMode::Namespace => NetworkMode::Namespace,
+                NetworkMode::ExternalPort => NetworkMode::ExternalPort,
+            },
+            upper_iface: state.server_net.upper_iface.clone(),
+            lower_iface: state.server_net.lower_iface.clone(),
+        },
     })
 }
 

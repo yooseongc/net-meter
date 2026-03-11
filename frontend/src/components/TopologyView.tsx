@@ -118,7 +118,8 @@ function DutBox({ label }: { label: string }) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function TopologyView({ compact = false }: { compact?: boolean }) {
-  const { testState, latestSnapshot: snap, networkMode, upperIface, lowerIface } = useTestStore()
+  const { testState, latestSnapshot: snap, runtimeConfig } = useTestStore()
+  const { mode: networkMode, upper_iface: upperIface, lower_iface: lowerIface } = runtimeConfig
 
   const isRunning = testState === 'running'
   const useNs = networkMode === 'namespace'

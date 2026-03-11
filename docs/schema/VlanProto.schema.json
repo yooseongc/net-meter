@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VlanProto",
+  "description": "VLAN 외부 EtherType 설정",
+  "oneOf": [
+    {
+      "description": "0x8100 — IEEE 802.1Q (표준)",
+      "type": "string",
+      "const": "dot1_q"
+    },
+    {
+      "description": "0x88a8 — IEEE 802.1ad (QinQ outer, carrier grade)",
+      "type": "string",
+      "const": "dot1_ad"
+    }
+  ]
+}

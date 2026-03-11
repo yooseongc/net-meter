@@ -1,6 +1,11 @@
 > **[구현 완료]** Phase 10 (Association 기반 설정 + VLAN) 및 Phase 11 (External Port Mode)
 > 모두 구현되었습니다. 이 문서는 설계 참고용으로 보존됩니다.
-> 실제 구현 상세는 `docs/PROCESS.md`를 참조하세요.
+> 실제 구현 상세는 `old_docs/PROCESS.md`를 참조하세요.
+>
+> 현재 구현과의 차이:
+> - 프로파일 저장은 브라우저 `localStorage`를 사용하며 `/api/profiles`는 제거되었습니다.
+> - 네트워크 모드는 시험 프로파일이 아니라 서버 런타임 설정(`--mode`)으로 결정됩니다.
+> - 시험 프로파일의 소켓 관련 필드는 현재 `network`가 아니라 `tcp_options`입니다.
 
 # 다음 단계 설계 (Phase 10, 11)
 
@@ -28,7 +33,7 @@ pub struct TestConfig {
     pub default_load: LoadConfig,
     /// 구 pairs → Association 목록
     pub associations: Vec<Association>,
-    pub network: NetworkConfig,        // 구 NsConfig → 일반화 (Phase 11 대비)
+    pub network: NetworkConfig,        // 설계 당시 명칭. 현재 구현은 tcp_options + runtime으로 분리
     pub thresholds: Thresholds,
 }
 ```
@@ -135,7 +140,7 @@ impl VlanProto {
 }
 ```
 
-#### NetworkConfig — NsConfig 일반화 (Phase 11 대비 포함)
+#### NetworkConfig — 설계 당시 NsConfig 일반화안
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]

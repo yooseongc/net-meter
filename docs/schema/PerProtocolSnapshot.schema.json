@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PerProtocolSnapshot",
+  "description": "프로토콜별 누적 카운터 (rate 제외, 합산 집계용)",
+  "type": "object",
+  "properties": {
+    "active_connections": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "bytes_rx_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "bytes_tx_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_attempted": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_established": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_failed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "connections_timed_out": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "latency_mean_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "latency_p99_ms": {
+      "type": "number",
+      "format": "double"
+    },
+    "requests_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "responses_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_2xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_4xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "status_5xx": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "connections_attempted",
+    "connections_established",
+    "connections_failed",
+    "connections_timed_out",
+    "active_connections",
+    "bytes_tx_total",
+    "bytes_rx_total",
+    "requests_total",
+    "responses_total",
+    "status_2xx",
+    "status_4xx",
+    "status_5xx",
+    "latency_mean_ms",
+    "latency_p99_ms"
+  ]
+}

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import {
+  isTestConfig,
   MetricsSnapshot,
+  RuntimeConfig,
   TestConfig,
   TestEventType,
   TestResult,
@@ -16,19 +18,13 @@ const MAX_EVENTS = 100
 // B-1: localStorage 기반 프로파일 관리
 const PROFILES_KEY = 'net-meter-profiles'
 
-function isValidConfig(c: unknown): boolean {
-  if (!c || typeof c !== 'object') return false
-  const o = c as Record<string, unknown>
-  return Array.isArray(o.clients) && Array.isArray(o.servers) && Array.isArray(o.associations)
-}
-
 function loadProfilesFromStorage(): TestConfig[] {
   try {
     const raw = localStorage.getItem(PROFILES_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(isValidConfig) as TestConfig[]
+    return parsed.filter(isTestConfig)
   } catch {
     return []
   }
@@ -60,9 +56,7 @@ interface TestStore {
   error: string | null
   eventLog: EventLogEntry[]
   draftConfig: TestConfig | null
-  networkMode: string
-  upperIface: string
-  lowerIface: string
+  runtimeConfig: RuntimeConfig
 
   fetchStatus: () => Promise<void>
   startTest: (config: TestConfig) => Promise<void>
@@ -131,9 +125,11 @@ export const useTestStore = create<TestStore>((set, get) => ({
   error: null,
   eventLog: [],
   draftConfig: null,
-  networkMode: 'loopback',
-  upperIface: 'veth-c0',
-  lowerIface: 'veth-s0',
+  runtimeConfig: {
+    mode: 'loopback',
+    upper_iface: 'veth-c0',
+    lower_iface: 'veth-s0',
+  },
 
   fetchStatus: async () => {
     try {
@@ -145,9 +141,11 @@ export const useTestStore = create<TestStore>((set, get) => ({
         testState: newState,
         activeProfile: status.config,
         elapsedSecs: status.elapsed_secs,
-        networkMode: status.network_mode ?? 'loopback',
-        upperIface: status.upper_iface ?? 'veth-c0',
-        lowerIface: status.lower_iface ?? 'veth-s0',
+        runtimeConfig: status.runtime ?? {
+          mode: 'loopback',
+          upper_iface: 'veth-c0',
+          lower_iface: 'veth-s0',
+        },
         error: null,
       })
 

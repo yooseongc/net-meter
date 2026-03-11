@@ -2,11 +2,12 @@ mod api;
 mod event;
 mod orchestrator;
 mod result;
+mod runtime;
+mod schema;
 mod state;
 mod tls;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -19,48 +20,7 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::event::TestEvent;
-use crate::state::ServerNetConfig;
-
-#[derive(Parser)]
-#[command(name = "net-meter", about = "Network performance measurement tool")]
-struct Cli {
-    /// Control API 서버 바인드 주소
-    #[arg(long, default_value = "0.0.0.0")]
-    host: String,
-
-    /// Control API 서버 포트
-    #[arg(long, short, default_value_t = 9090)]
-    port: u16,
-
-    /// 로그 레벨 (error, warn, info, debug, trace)
-    #[arg(long, default_value = "info")]
-    log_level: String,
-
-    /// 프론트엔드 정적 파일 디렉터리 (빌드 산출물 경로).
-    /// 지정하지 않으면 바이너리 옆의 `static/` 디렉터리를 자동 탐색한다.
-    #[arg(long)]
-    web_dir: Option<PathBuf>,
-
-    /// 네트워크 모드 (loopback, namespace, external_port)
-    #[arg(long, default_value = "loopback")]
-    mode: String,
-
-    /// Client 측 인터페이스 이름 (NS 모드: host veth, External Port 모드: 물리 NIC)
-    #[arg(long, default_value = "veth-c0")]
-    upper_iface: String,
-
-    /// Server 측 인터페이스 이름 (NS 모드: host veth, External Port 모드: 물리 NIC)
-    #[arg(long, default_value = "veth-s0")]
-    lower_iface: String,
-
-    /// MTU (External Port 모드에서 사용)
-    #[arg(long, default_value_t = 1500)]
-    mtu: u16,
-
-    /// Namespace prefix (NS 모드에서 사용)
-    #[arg(long, default_value = "nm")]
-    ns_prefix: String,
-}
+use crate::runtime::{Cli, RuntimeSettings};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,40 +31,28 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to install rustls ring CryptoProvider");
 
     let cli = Cli::parse();
+    let settings = RuntimeSettings::load(&cli)?;
 
     // 로깅 초기화
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(format!("net_meter={}", cli.log_level))
+            EnvFilter::new(format!("net_meter={}", settings.log_level))
         }))
         .init();
 
-    let network_mode = match cli.mode.as_str() {
-        "namespace" => NetworkMode::Namespace,
-        "external_port" => NetworkMode::ExternalPort,
-        _ => NetworkMode::Loopback,
-    };
-
-    let server_net = ServerNetConfig {
-        mode: network_mode,
-        upper_iface: cli.upper_iface.clone(),
-        lower_iface: cli.lower_iface.clone(),
-        mtu: cli.mtu,
-        ns_prefix: cli.ns_prefix.clone(),
-    };
-
     info!(
-        mode = %cli.mode,
-        upper_iface = %cli.upper_iface,
-        lower_iface = %cli.lower_iface,
+        mode = ?settings.server_net.mode,
+        upper_iface = %settings.server_net.upper_iface,
+        lower_iface = %settings.server_net.lower_iface,
+        config = ?cli.config,
         "net-meter control plane starting"
     );
 
     // 정적 파일 디렉터리 결정:
     //   1. --web-dir 명시 → 그대로 사용
     //   2. 생략 → 바이너리 옆 static/ 탐색
-    let web_dir = cli.web_dir.or_else(|| {
+    let web_dir = settings.web_dir.clone().or_else(|| {
         std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|p| p.join("static")))
@@ -117,17 +65,17 @@ async fn main() -> anyhow::Result<()> {
         info!("No web-dir found; only API endpoints are served");
     }
 
-    let state = state::AppState::new(server_net);
+    let state = state::AppState::new(settings.server_net.clone());
 
     // 네트워크 인프라 초기화 (모드별)
-    match network_mode {
+    match settings.server_net.mode {
         NetworkMode::Namespace => {
             net_meter_ns::check_capability()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             let mut ns = NamespaceManager::new(
-                &cli.ns_prefix,
-                &cli.upper_iface,
-                &cli.lower_iface,
+                &settings.server_net.ns_prefix,
+                &settings.server_net.upper_iface,
+                &settings.server_net.lower_iface,
             );
             ns.setup().await.map_err(|e| anyhow::anyhow!("NS setup failed: {}", e))?;
             let _ = state.event_tx.send(TestEvent::NsSetupComplete);
@@ -144,17 +92,17 @@ async fn main() -> anyhow::Result<()> {
             net_meter_ns::check_capability()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             let ext_state = net_meter_ns::setup_external_port(
-                &cli.upper_iface,
-                &cli.lower_iface,
-                cli.mtu,
+                &settings.server_net.upper_iface,
+                &settings.server_net.lower_iface,
+                settings.server_net.mtu,
             )
             .await
             .map_err(|e| anyhow::anyhow!("External port setup failed: {}", e))?;
             let _ = state.event_tx.send(TestEvent::ExtPortSetupComplete);
             info!(
-                upper_iface = %cli.upper_iface,
-                lower_iface = %cli.lower_iface,
-                mtu = cli.mtu,
+                upper_iface = %settings.server_net.upper_iface,
+                lower_iface = %settings.server_net.lower_iface,
+                mtu = settings.server_net.mtu,
                 "External port mode ready"
             );
             *state.ext_port_state.lock().await = Some(ext_state);
@@ -198,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let addr = format!("{}:{}", cli.host, cli.port);
+    let addr = format!("{}:{}", settings.host, settings.port);
     let listener = reuseport_listener(&addr)?;
     info!(addr = %addr, "Control API server listening");
 

@@ -22,5 +22,14 @@ export default defineConfig({
   build: {
     outDir: '../engine/crates/control/static',
     emptyOutDir: true,
+    cssCodeSplit: false,
+    modulePreload: false,
+    rollupOptions: {
+      output: {
+        // 운영 UI는 지연 로딩보다 단일 번들 배포를 우선한다.
+        inlineDynamicImports: true,
+        manualChunks: undefined,
+      },
+    },
   },
 })

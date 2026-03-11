@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -6,7 +7,7 @@ use std::collections::HashMap;
 // ---------------------------------------------------------------------------
 
 /// 시험 종류
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TestType {
     /// Connections Per Second: 각 워커가 connect→transact→close 루프를 최대 속도로 반복
@@ -18,7 +19,7 @@ pub enum TestType {
 }
 
 /// 트래픽 프로토콜
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
     /// Raw TCP (HTTP 없이 바이트 교환)
@@ -46,7 +47,7 @@ impl std::fmt::Display for Protocol {
 }
 
 /// HTTP 요청 메서드
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
     Get,
@@ -67,7 +68,7 @@ impl HttpMethod {
 // ---------------------------------------------------------------------------
 
 /// TCP 페이로드 프로파일
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TcpPayload {
     /// 클라이언트가 연결당 전송할 바이트 수
     #[serde(default)]
@@ -84,7 +85,7 @@ impl Default for TcpPayload {
 }
 
 /// HTTP 페이로드 프로파일
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HttpPayload {
     pub method: HttpMethod,
     pub path: String,
@@ -113,7 +114,7 @@ impl Default for HttpPayload {
 }
 
 /// 프로토콜별 페이로드 설정
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PayloadProfile {
     Tcp(TcpPayload),
@@ -138,7 +139,7 @@ impl PayloadProfile {
 /// - CPS 모드: 각 워커가 connect→transact→close 루프를 최대 속도로 반복.
 ///   `num_connections`는 전체 병렬 연결 루프 수(총량, 워커 수로 자동 분배).
 /// - CC/BW 모드: 전체 동시 연결 수 (`num_connections`)를 워커 수로 자동 분배.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LoadConfig {
     /// CPS: 전체 병렬 연결 루프 수 (워커 수로 자동 분배, 기본 1).
     /// CC/BW: 전체 유지할 동시 연결 수 (워커 수로 자동 분배).
@@ -205,7 +206,7 @@ impl LoadConfig {
 // ---------------------------------------------------------------------------
 
 /// 시험 Pass/Fail 임계값. 위반 시 대시보드 경고 또는 자동 중단.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Thresholds {
     #[serde(default)]
     pub min_cps: Option<f64>,
@@ -226,7 +227,7 @@ pub struct Thresholds {
 /// 각 ClientDef는 독립된 소스 IP 풀을 나타낸다.
 /// NS 모드: veth-c1에 IP alias로 할당.
 /// External Port 모드: client_iface에 직접 할당.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ClientDef {
     /// 고유 ID
     pub id: String,
@@ -282,7 +283,7 @@ impl Default for ClientDef {
 ///
 /// 프로토콜과 TLS 설정을 포함한다.
 /// 여러 Association이 동일한 ServerDef를 참조할 수 있다.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerDef {
     /// 고유 ID
     pub id: String,
@@ -327,7 +328,7 @@ impl Default for ServerDef {
 // ---------------------------------------------------------------------------
 
 /// VLAN 태그 설정
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VlanConfig {
     /// Outer VLAN ID (1~4094)
     pub outer_vid: u16,
@@ -340,13 +341,14 @@ pub struct VlanConfig {
 }
 
 /// VLAN 외부 EtherType 설정
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VlanProto {
     /// 0x8100 — IEEE 802.1Q (표준)
     #[default]
     Dot1Q,
     /// 0x88a8 — IEEE 802.1ad (QinQ outer, carrier grade)
+    #[serde(rename = "dot1_ad")]
     Dot1AD,
 }
 
@@ -367,7 +369,7 @@ impl VlanProto {
 ///
 /// Association 자체는 ID 참조만 담당하고, IP 대역/프로토콜 등의
 /// 세부 설정은 각각 ClientDef/ServerDef에 위임한다.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Association {
     /// 식별자
     pub id: String,
@@ -400,7 +402,7 @@ impl Association {
 // ---------------------------------------------------------------------------
 
 /// 네트워크 모드
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     /// 루프백 / 로컬 호스트 (개발/기능 검증용)
@@ -412,14 +414,14 @@ pub enum NetworkMode {
     ExternalPort,
 }
 
-/// 전체 네트워크/소켓 설정 (TestConfig 내 — tcp_quickack만)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkConfig {
+/// 시험 실행 시 적용되는 TCP 옵션.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TcpOptions {
     #[serde(default)]
     pub tcp_quickack: bool,
 }
 
-impl Default for NetworkConfig {
+impl Default for TcpOptions {
     fn default() -> Self {
         Self { tcp_quickack: false }
     }
@@ -432,7 +434,7 @@ impl Default for NetworkConfig {
 /// 전체 시험 설정.
 ///
 /// clients/servers 목록을 정의하고, associations로 연결을 매핑한다.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TestConfig {
     /// 고유 ID (UUID v4)
     pub id: String,
@@ -450,9 +452,9 @@ pub struct TestConfig {
     pub servers: Vec<ServerDef>,
     /// 클라이언트 ↔ 서버 트래픽 매핑 목록
     pub associations: Vec<Association>,
-    /// 네트워크 설정
+    /// 시험별 TCP 옵션.
     #[serde(default)]
-    pub network: NetworkConfig,
+    pub tcp_options: TcpOptions,
     /// 임계값 / 알람 설정
     #[serde(default)]
     pub thresholds: Thresholds,
@@ -496,7 +498,7 @@ impl TestConfig {
             clients: vec![client],
             servers: vec![server],
             associations: vec![assoc],
-            network: NetworkConfig::default(),
+            tcp_options: TcpOptions::default(),
             thresholds: Thresholds::default(),
         }
     }

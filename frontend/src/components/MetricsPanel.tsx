@@ -144,7 +144,12 @@ function LatencyChart({ data, range }: { data: ChartData; range: number }) {
   )
 }
 
-const DEFAULT_LE = [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1e9]
+const DEFAULT_LE = [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, null] as const
+
+function formatLatencyBucketLabel(leMs: number | null | undefined) {
+  if (leMs == null) return 'Inf'
+  return leMs >= 1000 ? `${leMs / 1000}s` : `${leMs}ms`
+}
 
 function LatencyHistogram({ snap }: { snap: MetricsSnapshot }) {
   const c = useChartColors()
@@ -154,7 +159,7 @@ function LatencyHistogram({ snap }: { snap: MetricsSnapshot }) {
   const barData = buckets
     .slice(0, -1)
     .map((b, i) => ({
-      le: b.le_ms >= 1000 ? `${b.le_ms / 1000}s` : `${b.le_ms}ms`,
+      le: formatLatencyBucketLabel(b.le_ms),
       count: i === 0 ? b.count : b.count - buckets[i - 1].count,
     }))
 
@@ -285,7 +290,7 @@ export default function MetricsPanel({ visibleCharts }: { visibleCharts: Set<Cha
   const chartData = buildChartData(history, chartRange)
   const targetCps = undefined // CPS is organic output in tight-loop mode
   const targetCc = (profile?.test_type === 'cc' || profile?.test_type === 'bw')
-    ? profile.default_load.num_connections
+    ? (profile.default_load.num_connections ?? undefined)
     : undefined
   const violations = snap.threshold_violations ?? []
   const isRampingUp = snap.is_ramping_up ?? false

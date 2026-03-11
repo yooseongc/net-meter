@@ -1,8 +1,9 @@
 use net_meter_core::{MetricsSnapshot, TestConfig};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// 시험 완료 후 저장되는 결과 레코드
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TestResult {
     /// 고유 ID (UUID v4)
     pub id: String,

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TcpPayload",
+  "description": "TCP 페이로드 프로파일",
+  "type": "object",
+  "properties": {
+    "rx_bytes": {
+      "description": "서버가 응답할 바이트 수",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    },
+    "tx_bytes": {
+      "description": "클라이언트가 연결당 전송할 바이트 수",
+      "type": "integer",
+      "format": "uint",
+      "default": 0,
+      "minimum": 0
+    }
+  }
+}

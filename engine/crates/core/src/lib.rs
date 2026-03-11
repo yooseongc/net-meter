@@ -5,7 +5,7 @@ pub mod state;
 
 pub use config::{
     Association, ClientDef, HttpMethod, HttpPayload, LoadConfig,
-    NetworkConfig, NetworkMode, PayloadProfile, Protocol, ServerDef, TcpPayload,
+    NetworkMode, PayloadProfile, Protocol, ServerDef, TcpOptions, TcpPayload,
     TestConfig, TestType, Thresholds, VlanConfig, VlanProto,
 };
 pub use error::NetMeterError;

@@ -3,6 +3,7 @@
 #
 # 사용법:
 #   ./scripts/run-dev.sh                            # loopback 모드, 포트 9090
+#   ./scripts/run-dev.sh --config config/namespace.runtime.yaml
 #   ./scripts/run-dev.sh --mode namespace           # Namespace 모드 (sudo 필요)
 #   ./scripts/run-dev.sh --mode external_port \
 #     --upper-iface eth1 --lower-iface eth2         # External Port 모드 (sudo 필요)
@@ -29,14 +30,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT=9090
 NO_BUILD=false
 NO_FE_BUILD=false
+CONFIG_PATH=""
 MODE="loopback"
 UPPER_IFACE="veth-c0"
 LOWER_IFACE="veth-s0"
 MTU=1500
 NS_PREFIX="nm"
+FILE_MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --config)       CONFIG_PATH="$2";  shift 2 ;;
         --port)         PORT="$2";         shift 2 ;;
         --no-build)     NO_BUILD=true;     shift   ;;
         --no-fe-build)  NO_FE_BUILD=true;  shift   ;;
@@ -53,6 +57,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "$CONFIG_PATH" && -f "$CONFIG_PATH" ]]; then
+    FILE_MODE="$(sed -n 's/^[[:space:]]*mode:[[:space:]]*//p' "$CONFIG_PATH" | head -n 1 | tr -d '"' | tr -d "'")"
+fi
+
+EFFECTIVE_MODE="$MODE"
+if [[ -n "$FILE_MODE" && "$MODE" == "loopback" ]]; then
+    EFFECTIVE_MODE="$FILE_MODE"
+fi
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -65,16 +78,17 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 step()  { echo -e "${CYAN}[STEP]${NC} $*"; }
 
 # 모드별 권한 검증
-if [[ "$MODE" == "namespace" || "$MODE" == "external_port" ]]; then
+if [[ "$EFFECTIVE_MODE" == "namespace" || "$EFFECTIVE_MODE" == "external_port" ]]; then
     if [[ "$EUID" -ne 0 ]]; then
-        error "Mode '$MODE' requires root (CAP_NET_ADMIN).\n  Run: sudo $0 $*"
+        error "Mode '$EFFECTIVE_MODE' requires root (CAP_NET_ADMIN).\n  Run: sudo $0 $*"
     fi
 fi
 
 echo "============================================"
 echo "  net-meter (dev mode — unminified build)"
 echo "============================================"
-info "Mode:        $MODE"
+info "Mode:        $EFFECTIVE_MODE"
+[[ -n "$CONFIG_PATH" ]] && info "Config:      $CONFIG_PATH"
 if [[ "$MODE" != "loopback" ]]; then
     info "Upper iface: $UPPER_IFACE"
     info "Lower iface: $LOWER_IFACE"
@@ -128,6 +142,13 @@ trap cleanup INT TERM
 RUN_ARGS=(
     --port "$PORT"
     --web-dir "$STATIC_DIR"
+)
+
+if [[ -n "$CONFIG_PATH" ]]; then
+    RUN_ARGS+=(--config "$CONFIG_PATH")
+fi
+
+RUN_ARGS+=(
     --mode "$MODE"
     --upper-iface "$UPPER_IFACE"
     --lower-iface "$LOWER_IFACE"
